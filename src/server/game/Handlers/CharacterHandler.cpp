@@ -980,20 +980,40 @@ void WorldSession::HandlePlayerLoginFromDB(LoginQueryHolder const& holder)
                 LOG_INFO("server.worldserver", "WSG Lobby: BG {} exists, status: {}, adding player",
                          bgInstanceId, bg->GetStatus());
 
-                // Set player's battleground data
+                // WSC-CL - Set player's battleground data first
                 pCurrChar->SetBattlegroundId(bgInstanceId, BATTLEGROUND_WS, 0, false, false, TeamId(teamId));
 
-                // Add player to battleground
+                // WSC-CL - Ensure the battleground map exists before adding player
+                if (!bg->FindBgMap())
+                {
+                    LOG_INFO("server.worldserver", "WSG Lobby: BG map doesn't exist, will be created when player is added");
+                }
+
+                // WSC-CL - Add player to battleground (this will trigger map creation if needed)
                 bg->AddPlayer(pCurrChar);
 
-                // Teleport player to battleground
-                sBattlegroundMgr->SendToBattleground(pCurrChar, bgInstanceId, BATTLEGROUND_WS);
+                // WSC-CL - Verify the player was added correctly
+                if (pCurrChar->GetBattleground())
+                {
+                    // WSC-CL - Send proper battleground status update
+                    WorldPacket data;
+                    sBattlegroundMgr->BuildBattlegroundStatusPacket(&data, bg, 0, STATUS_IN_PROGRESS, 0, bg->GetStartTime(), bg->GetArenaType(), pCurrChar->GetBgTeamId());
+                    pCurrChar->GetSession()->SendPacket(&data);
+
+                    // WSC-CL - Teleport player to battleground
+                    sBattlegroundMgr->SendToBattleground(pCurrChar, bgInstanceId, BATTLEGROUND_WS);
+
+                    LOG_INFO("server.worldserver", "WSG Lobby: Successfully added {} to BG {} on team {}",
+                             pCurrChar->GetName(), bgInstanceId, teamId == TEAM_ALLIANCE ? "Alliance" : "Horde");
+                }
+                else
+                {
+                    LOG_ERROR("server.worldserver", "WSG Lobby: Failed to add {} to BG {}", 
+                              pCurrChar->GetName(), bgInstanceId);
+                }
 
                 // Remove from wsg_lobby_players table
                 CharacterDatabase.Execute("DELETE FROM wsg_lobby_players WHERE guid = {}", pCurrChar->GetGUID().GetCounter());
-
-                LOG_INFO("server.worldserver", "WSG Lobby: Teleported {} to BG {} on team {}",
-                         pCurrChar->GetName(), bgInstanceId, teamId == TEAM_ALLIANCE ? "Alliance" : "Horde");
             }
             else
             {

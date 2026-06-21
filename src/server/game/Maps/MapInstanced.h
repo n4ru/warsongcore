@@ -25,6 +25,7 @@
 class MapInstanced : public Map
 {
     friend class MapMgr;
+    friend class BattlegroundMgr; // WSC-CL - Allow BattlegroundMgr to create battleground maps
 public:
     using InstancedMaps = std::unordered_map<uint32, Map*>;
 

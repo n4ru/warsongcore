@@ -3101,6 +3101,13 @@ public:
             return false;
         }
 
+        // WSC-CL - Check if this is a lobby battleground and if player is the leader
+        if (bg->IsLobbyBG() && !bg->IsLobbyLeader(player))
+        {
+            handler->PSendSysMessage("Only the lobby leader can start this battleground.");
+            return false;
+        }
+
         // Execute bgstart logic
         bg->ExecuteBgStart();
         

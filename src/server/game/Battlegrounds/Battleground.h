@@ -386,6 +386,14 @@ public:
     
     // WSC-CL - Add offline player to battleground (for lobby system)
     void AddOfflinePlayer(ObjectGuid guid, TeamId teamId, uint32 offlineTime = 0);  // Implementation in cpp file
+    
+    // WSC-CL - Lobby management functions
+    void SetupLobbyBG(const std::string& lobbyId, const std::string& leaderName, const std::vector<std::pair<std::string, TeamId>>& players);
+    void OnLobbyPlayerJoined(Player* player);  // Called when a lobby player actually joins
+    void StartLobbyTimer();  // Start the BG timer when all lobby players have joined
+    void ForceStartLobbyBG();  // Force start the BG for lobby leader
+    bool IsLobbyBG() const { return m_IsLobbyBG; }
+    bool IsLobbyLeader(Player* player) const;
 
     void DecreaseInvitedCount(TeamId teamId)    { if (m_BgInvitedPlayers[teamId]) --m_BgInvitedPlayers[teamId]; }
     void IncreaseInvitedCount(TeamId teamId)    { ++m_BgInvitedPlayers[teamId]; }
@@ -731,6 +739,19 @@ private:
         TeamId teamId;       // Player's team
     };
     std::map<ObjectGuid, OfflinePlayerInfo> m_OfflinePlayers;  // Map of offline players with their info
+
+    // WSC-CL - Lobby tracking
+    struct LobbyPlayerInfo
+    {
+        std::string characterName;
+        TeamId teamId;
+        bool hasJoined;  // Whether the player has actually joined the BG
+    };
+    std::string m_LobbyId;  // ID of the lobby that created this battleground
+    std::string m_LobbyLeader;  // Name of the lobby leader (can use .bgstart)
+    uint32 m_LobbyExpectedPlayers;  // Total number of players expected from lobby
+    bool m_IsLobbyBG;  // Whether this BG was created by the lobby system
+    uint32 m_LobbyJoinedCount;  // How many lobby players have actually joined
 
     // Invited counters are useful for player invitation to BG - do not allow, if BG is started to one faction to have 2 more players than another faction
     // Invited counters will be changed only when removing already invited player from queue, removing player from battleground and inviting player to BG

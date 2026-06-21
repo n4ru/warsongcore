@@ -86,6 +86,9 @@ public:
 
     void AddBattleground(Battleground* bg);
     void RemoveBattleground(BattlegroundTypeId bgTypeId, uint32 instanceId);
+    
+    // WSC-CL - Helper function to create battleground maps for lobbies
+    BattlegroundMap* CreateBattlegroundMap(uint32 instanceId, Battleground* bg, MapInstanced* mapInstanced);
     void AddToBGFreeSlotQueue(BattlegroundTypeId bgTypeId, Battleground* bg);
     void RemoveFromBGFreeSlotQueue(BattlegroundTypeId bgTypeId, uint32 instanceId);
     BGFreeSlotQueueContainer& GetBGFreeSlotQueueStore(BattlegroundTypeId bgTypeId);

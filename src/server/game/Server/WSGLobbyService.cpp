@@ -584,15 +584,49 @@ uint32 WSGLobbyService::CreateWSGInstanceForLobby(const std::string& lobbyId)
     // Add to battleground manager so it can be found later
     sBattlegroundMgr->AddBattleground(bg);
 
+    // WSC-CL - Setup lobby tracking for the battleground
+    std::string lobbyLeader = "";
+    std::vector<std::pair<std::string, TeamId>> lobbyPlayers;
+    
+    // Extract lobby leader and prepare player list
+    {
+        std::lock_guard<std::mutex> lock(_lobbiesMutex);
+        auto it = _lobbies.find(lobbyId);
+        if (it != _lobbies.end())
+        {
+            auto& lobby = it->second;
+            std::lock_guard<std::mutex> participantsLock(lobby->participantsMutex);
+            
+            // Get the lobby leader (first participant)
+            if (!lobby->participants.empty())
+            {
+                lobbyLeader = lobby->participants[0].characterName;
+            }
+            
+            // Prepare player list for battleground tracking
+            for (const auto& participant : lobby->participants)
+            {
+                lobbyPlayers.emplace_back(participant.characterName, participant.faction);
+            }
+        }
+    }
+    
+    // Setup the lobby battleground with tracking information
+    if (!lobbyLeader.empty() && !lobbyPlayers.empty())
+    {
+        bg->SetupLobbyBG(lobbyId, lobbyLeader, lobbyPlayers);
+        LOG_INFO("server.worldserver", "Setup lobby BG {} with leader {} and {} players", 
+                 lobbyId, lobbyLeader, lobbyPlayers.size());
+    }
+
     // WSC-CL - Set minimum players to 1v1 for custom lobbies
     // This allows the BG to start with any number of players
     bg->SetMinPlayersPerTeam(1);
     bg->SetMaxPlayersPerTeam(10); // WSG is 10v10 max
 
-    // WSC-CL - The map will be created automatically when the first player joins
-    // via MapInstanced::CreateInstanceForPlayer when they call Player::SetBattlegroundId
-    // We don't need to manually create it here
-
+    // WSC-CL - The map will be created when the first player joins
+    // via the modified _ProcessJoin function in Battleground.cpp
+    
     // Don't pre-reserve slots - let players join as they come online
     // The BG will start its countdown when at least 1v1 is present
 

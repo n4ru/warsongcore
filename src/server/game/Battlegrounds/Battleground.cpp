@@ -34,6 +34,7 @@
 #include "GameTime.h"
 #include "GridNotifiersImpl.h"
 #include "GroupMgr.h"
+#include "MapInstanced.h"
 #include "MapMgr.h"
 #include "MiscPackets.h"
 #include "Object.h"
@@ -190,6 +191,10 @@ Battleground::Battleground()
 
     m_BgInvitedPlayers[TEAM_ALLIANCE] = 0;
     m_BgInvitedPlayers[TEAM_HORDE]   = 0;
+    
+    // WSC-CL - Initialize lobby variables
+    m_IsLobbyBG = false;
+    m_LobbyJoinedCount = 0;
 
     m_TeamScores[TEAM_ALLIANCE]      = 0;
     m_TeamScores[TEAM_HORDE]         = 0;
@@ -523,9 +528,31 @@ inline void Battleground::_ProcessJoin(uint32 diff)
     {
         if (!FindBgMap())
         {
-            LOG_ERROR("bg.battleground", "Battleground::_ProcessJoin: map (map id: {}, instance id: {}) is not created!", m_MapId, m_InstanceID);
-            EndNow();
-            return;
+            // WSC-CL - Try to create the battleground map if it doesn't exist
+            LOG_INFO("bg.battleground", "Battleground::_ProcessJoin: Creating missing map (map id: {}, instance id: {})", m_MapId, m_InstanceID);
+            
+            MapInstanced* mapInstanced = static_cast<MapInstanced*>(sMapMgr->CreateBaseMap(m_MapId));
+            if (mapInstanced)
+            {
+                // Use the BattlegroundMgr's public function to create the battleground map
+                if (BattlegroundMap* bgMap = sBattlegroundMgr->CreateBattlegroundMap(m_InstanceID, this, mapInstanced))
+                {
+                    SetBgMap(bgMap);
+                    LOG_INFO("bg.battleground", "Battleground::_ProcessJoin: Successfully created map (map id: {}, instance id: {})", m_MapId, m_InstanceID);
+                }
+                else
+                {
+                    LOG_ERROR("bg.battleground", "Battleground::_ProcessJoin: Failed to create battleground map (map id: {}, instance id: {})", m_MapId, m_InstanceID);
+                    EndNow();
+                    return;
+                }
+            }
+            else
+            {
+                LOG_ERROR("bg.battleground", "Battleground::_ProcessJoin: Failed to get MapInstanced for map {}", m_MapId);
+                EndNow();
+                return;
+            }
         }
 
         // Setup here, only when at least one player has ported to the map
@@ -548,7 +575,17 @@ inline void Battleground::_ProcessJoin(uint32 diff)
                 sWorld->getIntConfig(CONFIG_ARENA_PREP_TIME) * IN_MILLISECONDS :
                 sWorld->getIntConfig(CONFIG_BATTLEGROUND_PREP_TIME) * IN_MILLISECONDS;
 
-        SetStartDelayTime(configuredPrepTime);
+        // WSC-CL - For lobby battlegrounds, don't start the timer yet - wait for all players
+        if (m_IsLobbyBG)
+        {
+            // Set a very long delay time to prevent auto-start, will be overridden by StartLobbyTimer()
+            SetStartDelayTime(600000); // 10 minutes
+            LOG_INFO("bg.battleground", "Battleground::_ProcessJoin: Lobby BG {} setup completed, waiting for all players", m_LobbyId);
+        }
+        else
+        {
+            SetStartDelayTime(configuredPrepTime);
+        }
 
         // Pre-mark events for announcements that should be skipped based on configured prep time
         if (configuredPrepTime < StartDelayTimes[BG_STARTING_EVENT_FIRST])
@@ -574,7 +611,7 @@ inline void Battleground::_ProcessJoin(uint32 diff)
         
         // WSC: Auto-trigger bgstart when first player enters if debug bg is active
         // This runs once after setup is completed and delay time is properly configured
-        if (sBattlegroundMgr->isTesting() && GetPlayersSize() >= 1)
+        if (sBattlegroundMgr->isTesting() && GetPlayersSize() >= 1 && !m_IsLobbyBG)
         {
             ExecuteBgStart();
         }
@@ -1328,6 +1365,9 @@ void Battleground::AddPlayer(Player* player)
 
     sScriptMgr->OnBattlegroundAddPlayer(this, player);
 
+    // WSC-CL - Check if this is a lobby player joining
+    OnLobbyPlayerJoined(player);
+
     // Log
     LOG_DEBUG("bg.battleground", "BATTLEGROUND: Player {} joined the battle.", player->GetName());
 }
@@ -2039,4 +2079,112 @@ void Battleground::ExecuteBgStart()
     // Force the battleground to start immediately by setting delay to 0
     // This will trigger StartingEventOpenDoors() on the next update cycle
     SetStartDelayTime(0);
+}
+
+// WSC-CL - Lobby management functions
+void Battleground::SetupLobbyBG(const std::string& lobbyId, const std::string& leader, const std::vector<std::pair<std::string, TeamId>>& players)
+{
+    m_LobbyId = lobbyId;
+    m_LobbyLeader = leader;
+    m_IsLobbyBG = true;
+    m_LobbyJoinedCount = 0;
+    
+    // Setup expected lobby player count
+    m_LobbyExpectedPlayers = players.size();
+    
+    LOG_INFO("bg.battleground", "SetupLobbyBG: Lobby {} with leader {} expects {} players", lobbyId, leader, players.size());
+}
+
+void Battleground::OnLobbyPlayerJoined(Player* player)
+{
+    if (!m_IsLobbyBG || !player)
+        return;
+    
+    // For lobby battlegrounds, any player joining is a lobby player since they come from the lobby system
+    m_LobbyJoinedCount++;
+    
+    LOG_INFO("bg.battleground", "OnLobbyPlayerJoined: Player {} joined lobby BG {} ({}/{})", 
+             player->GetName(), m_LobbyId, m_LobbyJoinedCount, m_LobbyExpectedPlayers);
+    
+    // Check if all lobby players have joined
+    if (m_LobbyJoinedCount >= m_LobbyExpectedPlayers)
+    {
+        LOG_INFO("bg.battleground", "OnLobbyPlayerJoined: All lobby players joined, starting timer for lobby {}", m_LobbyId);
+        StartLobbyTimer();
+    }
+}
+
+void Battleground::StartLobbyTimer()
+{
+    if (!m_IsLobbyBG)
+        return;
+    
+    LOG_INFO("bg.battleground", "StartLobbyTimer: All lobby players joined, starting countdown for lobby {}", m_LobbyId);
+    
+    // Get the configured prep time (same logic as normal _ProcessJoin)
+    uint32 configuredPrepTime;
+    
+    if (GetBgTypeID() == BATTLEGROUND_SA)
+        configuredPrepTime = 120 * IN_MILLISECONDS;
+    else
+        configuredPrepTime = isArena() ?
+            sWorld->getIntConfig(CONFIG_ARENA_PREP_TIME) * IN_MILLISECONDS :
+            sWorld->getIntConfig(CONFIG_BATTLEGROUND_PREP_TIME) * IN_MILLISECONDS;
+    
+    // Start the proper countdown timer
+    SetStartDelayTime(configuredPrepTime);
+    
+    // Reset events so announcements work properly
+    m_Events = 0;
+    
+    // Pre-mark events for announcements based on prep time
+    if (configuredPrepTime < StartDelayTimes[BG_STARTING_EVENT_FIRST])
+    {
+        m_Events |= BG_STARTING_EVENT_1;
+        if (configuredPrepTime < StartDelayTimes[BG_STARTING_EVENT_SECOND])
+        {
+            m_Events |= BG_STARTING_EVENT_2;
+            if (configuredPrepTime < StartDelayTimes[BG_STARTING_EVENT_THIRD])
+            {
+                m_Events |= BG_STARTING_EVENT_3;
+            }
+        }
+    }
+    
+    // Ensure all players have preparation spell when countdown begins
+    for (auto& [guid, player] : m_Players)
+    {
+        if (player && !isArena())
+        {
+            // Check if player already has preparation spell, if not apply it
+            if (!player->HasAura(SPELL_PREPARATION))
+            {
+                player->CastSpell(player, SPELL_PREPARATION, true);
+                LOG_INFO("bg.battleground", "StartLobbyTimer: Applied preparation spell to {}", player->GetName());
+            }
+            else
+            {
+                LOG_INFO("bg.battleground", "StartLobbyTimer: Player {} already has preparation spell", player->GetName());
+            }
+        }
+    }
+    
+    LOG_INFO("bg.battleground", "StartLobbyTimer: Started {}ms countdown for lobby {}", configuredPrepTime, m_LobbyId);
+}
+
+bool Battleground::IsLobbyLeader(Player* player) const
+{
+    if (!m_IsLobbyBG || !player)
+        return false;
+        
+    return player->GetName() == m_LobbyLeader;
+}
+
+void Battleground::ForceStartLobbyBG()
+{
+    if (!m_IsLobbyBG)
+        return;
+        
+    LOG_INFO("bg.battleground", "ForceStartLobbyBG: Lobby leader forcing immediate start for lobby {}", m_LobbyId);
+    ExecuteBgStart();
 }

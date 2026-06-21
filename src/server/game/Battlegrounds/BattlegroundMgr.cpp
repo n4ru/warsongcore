@@ -38,6 +38,7 @@
 #include "GameGraveyard.h"
 #include "GameTime.h"
 #include "Map.h"
+#include "MapInstanced.h"
 #include "MapMgr.h"
 #include "MiscPackets.h"
 #include "ObjectMgr.h"
@@ -1079,3 +1080,14 @@ std::unordered_map<uint32, ArenaType> BattlegroundMgr::QueueToArenaType =
     { BATTLEGROUND_QUEUE_3v3, ARENA_TYPE_3v3 },
     { BATTLEGROUND_QUEUE_5v5, ARENA_TYPE_5v5 }
 };
+
+// WSC-CL - Helper function to create battleground maps for lobbies
+BattlegroundMap* BattlegroundMgr::CreateBattlegroundMap(uint32 instanceId, Battleground* bg, MapInstanced* mapInstanced)
+{
+    if (!bg || !mapInstanced)
+        return nullptr;
+        
+    // Use the private CreateBattleground function via the MapInstanced class
+    // This is a friend function so we can call it through the manager
+    return mapInstanced->CreateBattleground(instanceId, bg);
+}
