@@ -1,14 +1,14 @@
 /*
  * This file is part of the AzerothCore Project. See AUTHORS file for Copyright information
  *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU Affero General Public License as published by the
- * Free Software Foundation; either version 3 of the License, or (at your
- * option) any later version.
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
  *
  * This program is distributed in the hope that it will be useful, but WITHOUT
  * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for
+ * FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for
  * more details.
  *
  * You should have received a copy of the GNU General Public License along
@@ -57,6 +57,7 @@ struct AuctionEntry;
 struct DeclinedName;
 struct ItemTemplate;
 struct MovementInfo;
+struct TradeStatusInfo;
 
 namespace lfg
 {
@@ -150,6 +151,7 @@ namespace WorldPackets
     {
         class MinimapPingClient;
         class RandomRollClient;
+        class Complain;
     }
 
     namespace Pet
@@ -188,6 +190,38 @@ namespace WorldPackets
         class CancelTempEnchantment;
         class ItemRefundInfo;
         class ItemRefund;
+    }
+
+    namespace Quest
+    {
+        class QuestPushResultClient;
+        class QuestGiverQuestAutoLaunch;
+        class QuestLogSwapQuest;
+        class QuestLogRemoveQuest;
+        class QuestConfirmAcceptClient;
+        class PushQuestToParty;
+    }
+
+    namespace Calendar
+    {
+        class GetEvent;
+        class GuildFilter;
+        class ArenaTeam;
+        class CalendarComplain;
+    }
+
+    namespace NPC
+    {
+        class Hello;
+        class TrainerBuySpell;
+    }
+
+    namespace Instance
+    {
+        class SetDungeonDifficultyClient;
+        class SetRaidDifficultyClient;
+        class ResetInstances;
+        class InstanceLockResponse;
     }
 }
 
@@ -368,6 +402,11 @@ public:
     void ValidateAccountFlags();
 
     bool IsGMAccount() const;
+    bool IsTrialAccount() const;
+    bool IsInternetGameRoomAccount() const;
+    bool IsRecurringBillingAccount() const;
+
+    uint8 GetBillingPlanFlags() const;
 
     bool PlayerLoading() const { return m_playerLoading; }
     bool PlayerLogout() const { return m_playerLogout; }
@@ -379,6 +418,10 @@ public:
 
     void ReadMovementInfo(WorldPacket& data, MovementInfo* mi);
     void WriteMovementInfo(WorldPacket* data, MovementInfo* mi);
+    void SynchronizeMovement(MovementInfo& movementInfo);
+    void HandleMoverRelocation(MovementInfo& movementInfo, Unit* mover);
+    bool VerifyMovementInfo(MovementInfo const& movementInfo, Player* plrMover, Unit* mover, Opcodes opcode) const;
+    bool ProcessMovementInfo(MovementInfo& movementInfo, Unit* mover, Player* plrMover, WorldPacket& recvData);
 
     void SendPacket(WorldPacket const* packet);
     void SendPetNameInvalid(uint32 error, std::string const& name, DeclinedName* declinedName);
@@ -407,6 +450,16 @@ public:
 
     AccountTypes GetSecurity() const { return _security; }
     bool CanSkipQueue() const { return _skipQueue; }
+
+    // RBAC
+    rbac::RBACData* GetRBACData() const { return _RBACData; }
+    bool HasPermission(uint32 permissionId);
+    void LoadPermissions();
+    QueryCallback LoadPermissionsAsync();
+    void InvalidateRBACData();
+
+    /// For unit testing - initializes RBAC data without database access
+    void InitRBACDataForTest();
     uint32 GetAccountId() const { return _accountId; }
     Player* GetPlayer() const { return _player; }
     std::string const& GetPlayerName() const;
@@ -465,8 +518,7 @@ public:
     //void SendTestCreatureQueryOpcode(uint32 entry, ObjectGuid guid, uint32 testvalue);
     void SendNameQueryOpcode(ObjectGuid guid);
 
-    void SendTrainerList(ObjectGuid guid);
-    void SendTrainerList(ObjectGuid guid, std::string const& strTitle);
+    void SendTrainerList(Creature* npc);
     void SendListInventory(ObjectGuid guid, uint32 vendorEntry = 0);
     void SendShowBank(ObjectGuid guid);
     bool CanOpenMailBox(ObjectGuid guid);
@@ -479,7 +531,7 @@ public:
 
     void SendBattleGroundList(ObjectGuid guid, BattlegroundTypeId bgTypeId = BATTLEGROUND_RB);
 
-    void SendTradeStatus(TradeStatus status);
+    void SendTradeStatus(TradeStatusInfo const& info);
     void SendUpdateTrade(bool trader_data = true);
     void SendCancelTrade(TradeStatus status);
 
@@ -582,6 +634,10 @@ public:
     // Time Synchronisation
     void ResetTimeSync();
     void SendTimeSync();
+
+    // Movement packet order
+    uint32 GetOrderCounter() const { return _orderCounter; }
+    void IncrementOrderCounter() { ++_orderCounter; }
 public:                                                 // opcodes handlers
     void Handle_NULL(WorldPacket& null);                // not used
     void Handle_EarlyProccess(WorldPacket& recvPacket); // just mark packets processed in WorldSocket::OnRead
@@ -601,6 +657,7 @@ public:                                                 // opcodes handlers
 
     void SendCharCreate(ResponseCodes result);
     void SendCharDelete(ResponseCodes result);
+    void SendCharLoginFailed(LoginFailureReason reason);
     void SendCharRename(ResponseCodes result, CharacterRenameInfo const* renameInfo);
     void SendCharCustomize(ResponseCodes result, CharacterCustomizeInfo const* customizeInfo);
     void SendCharFactionChange(ResponseCodes result, CharacterFactionChangeInfo const* factionChangeInfo);
@@ -610,7 +667,6 @@ public:                                                 // opcodes handlers
     void HandlePlayedTime(WorldPackets::Character::PlayedTimeClient& packet);
 
     // new
-    void HandleMoveUnRootAck(WorldPacket& recvPacket);
     void HandleMoveRootAck(WorldPacket& recvPacket);
 
     // new inspect
@@ -618,11 +674,6 @@ public:                                                 // opcodes handlers
 
     // new party stats
     void HandleInspectHonorStatsOpcode(WorldPacket& recvPacket);
-
-    void HandleMoveWaterWalkAck(WorldPacket& recvPacket);
-    void HandleFeatherFallAck(WorldPacket& recvData);
-
-    void HandleMoveHoverAck(WorldPacket& recvData);
 
     void HandleMountSpecialAnimOpcode(WorldPacket& recvdata);
 
@@ -773,8 +824,8 @@ public:                                                 // opcodes handlers
     void SendActivateTaxiReply(ActivateTaxiReply reply);
 
     void HandleTabardVendorActivateOpcode(WorldPacket& recvPacket);
-    void HandleTrainerListOpcode(WorldPacket& recvPacket);
-    void HandleTrainerBuySpellOpcode(WorldPacket& recvPacket);
+    void HandleTrainerListOpcode(WorldPackets::NPC::Hello& packet);
+    void HandleTrainerBuySpellOpcode(WorldPackets::NPC::TrainerBuySpell& packet);
     void HandlePetitionShowListOpcode(WorldPacket& recvPacket);
     void HandleGossipHelloOpcode(WorldPacket& recvPacket);
     void HandleGossipSelectOptionOpcode(WorldPacket& recvPacket);
@@ -874,13 +925,13 @@ public:                                                 // opcodes handlers
     void HandleQuestgiverRequestRewardOpcode(WorldPacket& recvPacket);
     void HandleQuestQueryOpcode(WorldPacket& recvPacket);
     void HandleQuestgiverCancel(WorldPacket& recvData);
-    void HandleQuestLogSwapQuest(WorldPacket& recvData);
-    void HandleQuestLogRemoveQuest(WorldPacket& recvData);
-    void HandleQuestConfirmAccept(WorldPacket& recvData);
+    void HandleQuestLogSwapQuest(WorldPackets::Quest::QuestLogSwapQuest& packet);
+    void HandleQuestLogRemoveQuest(WorldPackets::Quest::QuestLogRemoveQuest& packet);
+    void HandleQuestConfirmAccept(WorldPackets::Quest::QuestConfirmAcceptClient& packet);
     void HandleQuestgiverCompleteQuest(WorldPacket& recvData);
-    void HandleQuestgiverQuestAutoLaunch(WorldPacket& recvPacket);
-    void HandlePushQuestToParty(WorldPacket& recvPacket);
-    void HandleQuestPushResult(WorldPacket& recvPacket);
+    void HandleQuestgiverQuestAutoLaunch(WorldPackets::Quest::QuestGiverQuestAutoLaunch& packet);
+    void HandlePushQuestToParty(WorldPackets::Quest::PushQuestToParty& packet);
+    void HandleQuestPushResult(WorldPackets::Quest::QuestPushResultClient& packet);
 
     void HandleMessagechatOpcode(WorldPacket& recvPacket);
     void SendPlayerNotFoundNotice(std::string const& name);
@@ -966,16 +1017,16 @@ public:                                                 // opcodes handlers
     void HandleMinimapPingOpcode(WorldPackets::Misc::MinimapPingClient& packet);
     void HandleRandomRollOpcode(WorldPackets::Misc::RandomRollClient& packet);
     void HandleFarSightOpcode(WorldPacket& recvData);
-    void HandleSetDungeonDifficultyOpcode(WorldPacket& recvData);
-    void HandleSetRaidDifficultyOpcode(WorldPacket& recvData);
-    void HandleMoveSetCanFlyAckOpcode(WorldPacket& recvData);
+    void HandleSetDungeonDifficultyOpcode(WorldPackets::Instance::SetDungeonDifficultyClient& packet);
+    void HandleSetRaidDifficultyOpcode(WorldPackets::Instance::SetRaidDifficultyClient& packet);
+    void HandleMoveFlagChangeOpcode(WorldPacket& recvData);
     void HandleSetTitleOpcode(WorldPacket& recvData);
     void HandleRealmSplitOpcode(WorldPacket& recvData);
     void HandleTimeSyncResp(WorldPacket& recvData);
     void HandleWhoisOpcode(WorldPacket& recvData);
-    void HandleResetInstancesOpcode(WorldPacket& recvData);
+    void HandleResetInstancesOpcode(WorldPackets::Instance::ResetInstances& packet);
     void HandleHearthAndResurrect(WorldPacket& recvData);
-    void HandleInstanceLockResponse(WorldPacket& recvPacket);
+    void HandleInstanceLockResponse(WorldPackets::Instance::InstanceLockResponse& packet);
     void HandleUpdateMissileTrajectory(WorldPacket& recvPacket);
 
     // Battlefield
@@ -1032,7 +1083,7 @@ public:                                                 // opcodes handlers
     void HandleAreaSpiritHealerQueueOpcode(WorldPacket& recvData);
     void HandleCancelMountAuraOpcode(WorldPacket& recvData);
     void HandleSelfResOpcode(WorldPacket& recvData);
-    void HandleComplainOpcode(WorldPacket& recvData);
+    void HandleComplainOpcode(WorldPackets::Misc::Complain& packet);
     void HandleRequestPetInfo(WorldPackets::Pet::RequestPetInfo& packet);
 
     // Socket gem
@@ -1069,9 +1120,9 @@ public:                                                 // opcodes handlers
 
     // Calendar
     void HandleCalendarGetCalendar(WorldPacket& recvData);
-    void HandleCalendarGetEvent(WorldPacket& recvData);
-    void HandleCalendarGuildFilter(WorldPacket& recvData);
-    void HandleCalendarArenaTeam(WorldPacket& recvData);
+    void HandleCalendarGetEvent(WorldPackets::Calendar::GetEvent& packet);
+    void HandleCalendarGuildFilter(WorldPackets::Calendar::GuildFilter& packet);
+    void HandleCalendarArenaTeam(WorldPackets::Calendar::ArenaTeam& packet);
     void HandleCalendarAddEvent(WorldPacket& recvData);
     void HandleCalendarUpdateEvent(WorldPacket& recvData);
     void HandleCalendarRemoveEvent(WorldPacket& recvData);
@@ -1081,7 +1132,7 @@ public:                                                 // opcodes handlers
     void HandleCalendarEventRemoveInvite(WorldPacket& recvData);
     void HandleCalendarEventStatus(WorldPacket& recvData);
     void HandleCalendarEventModeratorStatus(WorldPacket& recvData);
-    void HandleCalendarComplain(WorldPacket& recvData);
+    void HandleCalendarComplain(WorldPackets::Calendar::CalendarComplain& packet);
     void HandleCalendarGetNumPending(WorldPacket& recvData);
     void HandleCalendarEventSignup(WorldPacket& recvData);
 
@@ -1107,7 +1158,6 @@ public:                                                 // opcodes handlers
     void HandleEnterPlayerVehicle(WorldPacket& data);
     void HandleUpdateProjectilePosition(WorldPacket& recvPacket);
 
-    void HandleTeleportTimeout(bool updateInSessions);
     bool HandleSocketClosed();
     void SetOfflineTime(uint32 time) { _offlineTime = time; }
     uint32 GetOfflineTime() const { return _offlineTime; }
@@ -1125,6 +1175,8 @@ public:                                                 // opcodes handlers
 
     void InitializeSession();
     void InitializeSessionCallback(CharacterDatabaseQueryHolder const& realmHolder, uint32 clientCacheVersion);
+
+    void SetPacketLogging(bool state);
 
 private:
     void ProcessQueryCallbacks();
@@ -1192,6 +1244,7 @@ private:
     AccountTypes _security;
     bool _skipQueue;
     uint32 _accountId;
+    rbac::RBACData* _RBACData;
     std::string _accountName;
     uint32 _accountFlags;
     uint8 m_expansion;
@@ -1235,6 +1288,8 @@ private:
     std::map<uint32, uint32> _pendingTimeSyncRequests; // key: counter. value: server time when packet with that counter was sent.
     uint32 _timeSyncNextCounter;
     uint32 _timeSyncTimer;
+
+    uint32 _orderCounter;
 
     WorldSession(WorldSession const& right) = delete;
     WorldSession& operator=(WorldSession const& right) = delete;

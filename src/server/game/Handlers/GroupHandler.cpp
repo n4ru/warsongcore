@@ -1,14 +1,14 @@
 /*
  * This file is part of the AzerothCore Project. See AUTHORS file for Copyright information
  *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU Affero General Public License as published by the
- * Free Software Foundation; either version 3 of the License, or (at your
- * option) any later version.
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
  *
  * This program is distributed in the hope that it will be useful, but WITHOUT
  * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for
+ * FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for
  * more details.
  *
  * You should have received a copy of the GNU General Public License along
@@ -89,6 +89,12 @@ void WorldSession::HandleGroupInviteOpcode(WorldPacket& recvData)
     if (!sScriptMgr->OnPlayerCanGroupInvite(invitingPlayer, membername))
         return;
 
+    if (sWorld->getBoolConfig(CONFIG_TRIAL_RESTRICTION_PARTY) && IsTrialAccount())
+    {
+        SendPartyResult(PARTY_OP_INVITE, membername, ERR_INVITE_RESTRICTED);
+        return;
+    }
+
     if (invitingPlayer->IsSpectator() || invitedPlayer->IsSpectator())
     {
         SendPartyResult(PARTY_OP_INVITE, membername, ERR_INVITE_RESTRICTED);
@@ -126,6 +132,16 @@ void WorldSession::HandleGroupInviteOpcode(WorldPacket& recvData)
         return;
     }
 
+    // Battlefield raids (e.g. Wintergrasp) have their composition managed by the BF
+    // system based on queue and team balance. Letting raid members recruit outsiders
+    // bypasses Battlefield::AddOrSetPlayerToCorrectBfGroup, which on WG entry then
+    // refuses to add the invitee because they are already in a BF group.
+    if (Group* invitingGroup = invitingPlayer->GetGroup(); invitingGroup && invitingGroup->isBFGroup())
+    {
+        SendPartyResult(PARTY_OP_INVITE, membername, ERR_NOT_LEADER);
+        return;
+    }
+
     Group* group = invitingPlayer->GetGroup();
     if (group && group->isBGGroup())
         group = invitingPlayer->GetOriginalGroup();
@@ -149,7 +165,7 @@ void WorldSession::HandleGroupInviteOpcode(WorldPacket& recvData)
             data << uint32(0);                                      // unk
             data << uint8(0);                                       // count
             data << uint32(0);                                      // unk
-            invitedPlayer->GetSession()->SendPacket(&data);
+            invitedPlayer->SendDirectMessage(&data);
         }
 
         return;
@@ -209,7 +225,7 @@ void WorldSession::HandleGroupInviteOpcode(WorldPacket& recvData)
     data << uint32(0);                                      // unk
     data << uint8(0);                                       // count
     data << uint32(0);                                      // unk
-    invitedPlayer->GetSession()->SendPacket(&data);
+    invitedPlayer->SendDirectMessage(&data);
 
     SendPartyResult(PARTY_OP_INVITE, membername, ERR_PARTY_RESULT_OK);
 }
@@ -234,6 +250,40 @@ void WorldSession::HandleGroupAcceptOpcode(WorldPacket& recvData)
     if (!sScriptMgr->OnPlayerCanGroupAccept(GetPlayer(), group))
         return;
 
+    Player* leader = ObjectAccessor::FindConnectedPlayer(group->GetLeaderGUID());
+
+    // Trial accounts cannot join a group whose existing members are above the trial level cap.
+    if (sWorld->getBoolConfig(CONFIG_TRIAL_RESTRICTION_PARTY) && IsTrialAccount())
+    {
+        if (uint32 trialLevelCap = sWorld->getIntConfig(CONFIG_TRIAL_LEVEL_CAP))
+        {
+            uint8 leaderLevel = leader ? leader->GetLevel() : sCharacterCache->GetCharacterLevelByGuid(group->GetLeaderGUID());
+            if (leaderLevel > trialLevelCap)
+            {
+                SendPartyResult(PARTY_OP_INVITE, "", ERR_INVITE_RESTRICTED);
+                return;
+            }
+
+            for (auto const& slot : group->GetMemberSlots())
+            {
+                if (slot.guid == GetPlayer()->GetGUID())
+                    continue;
+
+                uint8 memberLevel = 0;
+                if (Player* member = ObjectAccessor::FindConnectedPlayer(slot.guid))
+                    memberLevel = member->GetLevel();
+                else
+                    memberLevel = sCharacterCache->GetCharacterLevelByGuid(slot.guid);
+
+                if (memberLevel > trialLevelCap)
+                {
+                    SendPartyResult(PARTY_OP_INVITE, "", ERR_INVITE_RESTRICTED);
+                    return;
+                }
+            }
+        }
+    }
+
     if (group->GetLeaderGUID() == GetPlayer()->GetGUID())
     {
         LOG_ERROR("network.opcode", "HandleGroupAcceptOpcode: player {} ({}) tried to accept an invite to his own group",
@@ -247,8 +297,6 @@ void WorldSession::HandleGroupAcceptOpcode(WorldPacket& recvData)
         SendPartyResult(PARTY_OP_INVITE, "", ERR_GROUP_FULL);
         return;
     }
-
-    Player* leader = ObjectAccessor::FindConnectedPlayer(group->GetLeaderGUID());
 
     // Forming a new group, create it
     if (!group->IsCreated())
@@ -292,7 +340,7 @@ void WorldSession::HandleGroupDeclineOpcode(WorldPacket& /*recvData*/)
     // report
     WorldPacket data(SMSG_GROUP_DECLINE, GetPlayer()->GetName().length());
     data << GetPlayer()->GetName();
-    leader->GetSession()->SendPacket(&data);
+    leader->SendDirectMessage(&data);
 }
 
 void WorldSession::HandleGroupUninviteGuidOpcode(WorldPacket& recvData)
@@ -439,11 +487,8 @@ void WorldSession::HandleGroupDisbandOpcode(WorldPacket& /*recvData*/)
     if (!grp && !grpInvite)
         return;
 
-    if (_player->InBattleground())
-    {
-        SendPartyResult(PARTY_OP_INVITE, "", ERR_INVITE_RESTRICTED);
+    if (_player->InBattleground()) // Do not leave group, give no error. Verified on TBC Classic
         return;
-    }
 
     /** error handling **/
     /********************/

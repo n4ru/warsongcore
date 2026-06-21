@@ -1,14 +1,14 @@
 /*
  * This file is part of the AzerothCore Project. See AUTHORS file for Copyright information
  *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU Affero General Public License as published by the
- * Free Software Foundation; either version 3 of the License, or (at your
- * option) any later version.
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
  *
  * This program is distributed in the hope that it will be useful, but WITHOUT
  * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for
+ * FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for
  * more details.
  *
  * You should have received a copy of the GNU General Public License along
@@ -176,25 +176,25 @@ public:
                 if (Creature* weegli = ObjectAccessor::GetCreature(*me, instance->GetGuidData(NPC_WEEGLI)))
                 {
                     weegli->CastSpell(weegli, SPELL_BLYS_BAND_ESCAPE);
-                    weegli->DespawnOrUnsummon(10000);
+                    weegli->DespawnOrUnsummon(10s);
                 }
                 if (Creature* raven = ObjectAccessor::GetCreature(*me, instance->GetGuidData(NPC_RAVEN)))
                 {
                     raven->CastSpell(raven, SPELL_BLYS_BAND_ESCAPE);
-                    raven->DespawnOrUnsummon(10000);
+                    raven->DespawnOrUnsummon(10s);
                 }
                 if (Creature* oro = ObjectAccessor::GetCreature(*me, instance->GetGuidData(NPC_ORO)))
                 {
                     oro->CastSpell(oro, SPELL_BLYS_BAND_ESCAPE);
-                    oro->DespawnOrUnsummon(10000);
+                    oro->DespawnOrUnsummon(10s);
                 }
                 if (Creature* murta = ObjectAccessor::GetCreature(*me, instance->GetGuidData(NPC_MURTA)))
                 {
                     murta->CastSpell(murta, SPELL_BLYS_BAND_ESCAPE);
-                    murta->DespawnOrUnsummon(10000);
+                    murta->DespawnOrUnsummon(10s);
                 }
                 DoCastSelf(SPELL_BLYS_BAND_ESCAPE);
-                me->DespawnOrUnsummon(10000);
+                me->DespawnOrUnsummon(10s);
                 Porthome_Timer = 156000; //set timer back so that the event doesn't keep triggering
             }
             else
@@ -436,7 +436,7 @@ public:
                             case 1:
                                 me->GetMotionMaster()->MovePoint(2, 1871.18f, 1100.f, 8.88f);
                                 Talk(SAY_WEEGLI_OUT_OF_HERE);
-                                me->DespawnOrUnsummon(8000);
+                                me->DespawnOrUnsummon(8s);
                                 instance->SetData(DATA_PYRAMID, PYRAMID_GATES_DESTROYED);
                                 destroyingDoor = false;
                                 break;
@@ -585,9 +585,9 @@ enum ShadowPriestSezzizEnum
 std::array<std::vector<std::pair<uint32, Position>>, 4> shadowpriestSezzizAdds =
 { {
     { { NPC_SANDFURY_ZEALOT, { 1874.12f, 1198.90f, 8.87f } }, { NPC_SANDFURY_ACOLYTE, { 1874.12f, 1198.90f, 8.87f } } },
-    { { NPC_SANDFURY_ACOLYTE, { 895.26f, 1199.09f, 8.87f } }, { NPC_SANDFURY_ACOLYTE, { 895.26f, 1199.088f, 8.87f } } },
-    { { NPC_SANDFURY_ZEALOT, { 1874.12f, 1198.90f, 8.87f } }, { NPC_SANDFURY_ACOLYTE, { 895.26f, 1199.09f, 8.87f } }, { NPC_SANDFURY_ACOLYTE, { 895.26f, 1199.09f, 8.87f } } },
-    { { NPC_SANDFURY_ZEALOT, { 895.26f, 1199.09f, 8.87f } }, { NPC_SANDFURY_ZEALOT, { 1874.12f, 1198.90f, 8.87f } }, { NPC_SANDFURY_ACOLYTE, { 1874.12f, 1198.90f } }, { NPC_SANDFURY_ACOLYTE, { 895.26f, 1199.09f, 8.87f } } }
+    { { NPC_SANDFURY_ACOLYTE, { 1895.26f, 1199.09f, 8.87f } }, { NPC_SANDFURY_ACOLYTE, { 1895.26f, 1199.088f, 8.87f } } },
+    { { NPC_SANDFURY_ZEALOT, { 1874.12f, 1198.90f, 8.87f } }, { NPC_SANDFURY_ACOLYTE, { 1895.26f, 1199.09f, 8.87f } }, { NPC_SANDFURY_ACOLYTE, { 1895.26f, 1199.09f, 8.87f } } },
+    { { NPC_SANDFURY_ZEALOT, { 1895.26f, 1199.09f, 8.87f } }, { NPC_SANDFURY_ZEALOT, { 1874.12f, 1198.90f, 8.87f } }, { NPC_SANDFURY_ACOLYTE, { 1874.12f, 1198.90f } }, { NPC_SANDFURY_ACOLYTE, { 1895.26f, 1199.09f, 8.87f } } }
 } };
 
 class npc_shadowpriest_sezziz : public CreatureScript

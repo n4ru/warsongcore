@@ -1,14 +1,14 @@
 /*
  * This file is part of the AzerothCore Project. See AUTHORS file for Copyright information
  *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU Affero General Public License as published by the
- * Free Software Foundation; either version 3 of the License, or (at your
- * option) any later version.
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
  *
  * This program is distributed in the hope that it will be useful, but WITHOUT
  * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for
+ * FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for
  * more details.
  *
  * You should have received a copy of the GNU General Public License along
@@ -34,6 +34,7 @@
 #include "GameTime.h"
 #include "GridNotifiersImpl.h"
 #include "GroupMgr.h"
+#include "MapInstanced.h"
 #include "MapMgr.h"
 #include "MiscPackets.h"
 #include "Object.h"
@@ -41,6 +42,7 @@
 #include "ObjectMgr.h"
 #include "Pet.h"
 #include "Player.h"
+#include "RBAC.h"
 #include "ReputationMgr.h"
 #include "ScriptMgr.h"
 #include "SpellAuras.h"
@@ -162,6 +164,8 @@ Battleground::Battleground()
     m_IsRated           = false;
     m_BuffChange        = false;
     m_IsRandom          = false;
+    m_LobbyCreated      = false;
+    m_DelayedStart      = false;
     m_LevelMin          = 0;
     m_LevelMax          = 0;
     m_SetDeleteThis     = false;
@@ -188,6 +192,10 @@ Battleground::Battleground()
 
     m_BgInvitedPlayers[TEAM_ALLIANCE] = 0;
     m_BgInvitedPlayers[TEAM_HORDE]   = 0;
+    
+    // WSC-CL - Initialize lobby variables
+    m_IsLobbyBG = false;
+    m_LobbyJoinedCount = 0;
 
     m_TeamScores[TEAM_ALLIANCE]      = 0;
     m_TeamScores[TEAM_HORDE]         = 0;
@@ -376,6 +384,9 @@ inline void Battleground::_CheckSafePositions(uint32 diff)
 
         for (auto const& [playerGuid, player] : GetPlayers())
         {
+            if (player->IsGameMaster())
+                continue;
+
             Position pos = player->GetPosition();
             Position const* startPos = GetTeamStartPosition(player->GetBgTeamId());
 
@@ -521,9 +532,31 @@ inline void Battleground::_ProcessJoin(uint32 diff)
     {
         if (!FindBgMap())
         {
-            LOG_ERROR("bg.battleground", "Battleground::_ProcessJoin: map (map id: {}, instance id: {}) is not created!", m_MapId, m_InstanceID);
-            EndNow();
-            return;
+            // WSC-CL - Try to create the battleground map if it doesn't exist
+            LOG_INFO("bg.battleground", "Battleground::_ProcessJoin: Creating missing map (map id: {}, instance id: {})", m_MapId, m_InstanceID);
+            
+            MapInstanced* mapInstanced = static_cast<MapInstanced*>(sMapMgr->CreateBaseMap(m_MapId));
+            if (mapInstanced)
+            {
+                // Use the BattlegroundMgr's public function to create the battleground map
+                if (BattlegroundMap* bgMap = sBattlegroundMgr->CreateBattlegroundMap(m_InstanceID, this, mapInstanced))
+                {
+                    SetBgMap(bgMap);
+                    LOG_INFO("bg.battleground", "Battleground::_ProcessJoin: Successfully created map (map id: {}, instance id: {})", m_MapId, m_InstanceID);
+                }
+                else
+                {
+                    LOG_ERROR("bg.battleground", "Battleground::_ProcessJoin: Failed to create battleground map (map id: {}, instance id: {})", m_MapId, m_InstanceID);
+                    EndNow();
+                    return;
+                }
+            }
+            else
+            {
+                LOG_ERROR("bg.battleground", "Battleground::_ProcessJoin: Failed to get MapInstanced for map {}", m_MapId);
+                EndNow();
+                return;
+            }
         }
 
         // Setup here, only when at least one player has ported to the map
@@ -546,7 +579,17 @@ inline void Battleground::_ProcessJoin(uint32 diff)
                 sWorld->getIntConfig(CONFIG_ARENA_PREP_TIME) * IN_MILLISECONDS :
                 sWorld->getIntConfig(CONFIG_BATTLEGROUND_PREP_TIME) * IN_MILLISECONDS;
 
-        SetStartDelayTime(configuredPrepTime);
+        // WSC-CL - For lobby battlegrounds, don't start the timer yet - wait for all players
+        if (m_IsLobbyBG)
+        {
+            // Set a very long delay time to prevent auto-start, will be overridden by StartLobbyTimer()
+            SetStartDelayTime(600000); // 10 minutes
+            LOG_INFO("bg.battleground", "Battleground::_ProcessJoin: Lobby BG {} setup completed, waiting for all players", m_LobbyId);
+        }
+        else
+        {
+            SetStartDelayTime(configuredPrepTime);
+        }
 
         // Pre-mark events for announcements that should be skipped based on configured prep time
         if (configuredPrepTime < StartDelayTimes[BG_STARTING_EVENT_FIRST])
@@ -572,7 +615,7 @@ inline void Battleground::_ProcessJoin(uint32 diff)
         
         // WSC: Auto-trigger bgstart when first player enters if debug bg is active
         // This runs once after setup is completed and delay time is properly configured
-        if (sBattlegroundMgr->isTesting() && GetPlayersSize() >= 1)
+        if (sBattlegroundMgr->isTesting() && GetPlayersSize() >= 1 && !m_IsLobbyBG)
         {
             ExecuteBgStart();
         }
@@ -655,7 +698,7 @@ inline void Battleground::_ProcessJoin(uint32 diff)
                 {
                     WorldPacket status;
                     sBattlegroundMgr->BuildBattlegroundStatusPacket(&status, this, player->GetCurrentBattlegroundQueueSlot(), STATUS_IN_PROGRESS, 0, GetStartTime(), GetArenaType(), player->GetBgTeamId());
-                    player->GetSession()->SendPacket(&status);
+                    player->SendDirectMessage(&status);
 
                     player->RemoveAurasDueToSpell(SPELL_ARENA_PREPARATION);
                     player->ResetAllPowers();
@@ -699,7 +742,7 @@ inline void Battleground::_ProcessJoin(uint32 diff)
                             data << t->GetGUID();
                             data << uint32(t->GetZoneId());
                             data << uint32(15 * IN_MILLISECONDS);
-                            p->GetSession()->SendPacket(&data);
+                            p->SendDirectMessage(&data);
                         }
                 m_ToBeTeleported.clear();
             }
@@ -718,7 +761,7 @@ inline void Battleground::_ProcessJoin(uint32 diff)
 
             // Announce BG starting
             if (sWorld->getBoolConfig(CONFIG_BATTLEGROUND_QUEUE_ANNOUNCER_ENABLE))
-                ChatHandler(nullptr).SendWorldText(LANG_BG_STARTED_ANNOUNCE_WORLD, GetName(), std::min(GetMinLevel(), (uint32)80), std::min(GetMaxLevel(), (uint32)80));
+                ChatHandler(nullptr).SendWorldTextOptional(LANG_BG_STARTED_ANNOUNCE_WORLD, ANNOUNCER_FLAG_DISABLE_PVP_START, GetName(), std::min(GetMinLevel(), (uint32)80), std::min(GetMaxLevel(), (uint32)80));
 
             sScriptMgr->OnBattlegroundStart(this);
         }
@@ -783,14 +826,14 @@ Position const* Battleground::GetTeamStartPosition(TeamId teamId) const
 void Battleground::SendPacketToAll(WorldPacket const* packet)
 {
     for (BattlegroundPlayerMap::const_iterator itr = m_Players.begin(); itr != m_Players.end(); ++itr)
-        itr->second->GetSession()->SendPacket(packet);
+        itr->second->SendDirectMessage(packet);
 }
 
 void Battleground::SendPacketToTeam(TeamId teamId, WorldPacket const* packet, Player* sender, bool self)
 {
     for (BattlegroundPlayerMap::const_iterator itr = m_Players.begin(); itr != m_Players.end(); ++itr)
         if (itr->second->GetBgTeamId() == teamId && (self || sender != itr->second))
-            itr->second->GetSession()->SendPacket(packet);
+            itr->second->SendDirectMessage(packet);
 }
 
 void Battleground::SendChatMessage(Creature* source, uint8 textId, WorldObject* target /*= nullptr*/)
@@ -970,7 +1013,7 @@ void Battleground::EndBattleground(PvPTeamId winnerTeamId)
         {
             //needed cause else in av some creatures will kill the players at the end
             player->CombatStop();
-            player->getHostileRefMgr().deleteReferences();
+            player->GetThreatMgr().RemoveMeFromThreatLists();
         }
 
         uint32 winner_kills = player->GetRandomWinner() ? sWorld->getIntConfig(CONFIG_BG_REWARD_WINNER_HONOR_LAST) : sWorld->getIntConfig(CONFIG_BG_REWARD_WINNER_HONOR_FIRST);
@@ -990,6 +1033,33 @@ void Battleground::EndBattleground(PvPTeamId winnerTeamId)
 
                 if (!player->GetRandomWinner())
                     player->SetRandomWinner(true);
+
+                // Achievement 908 / 909 "Call to Arms!"
+                switch (GetBgTypeID(true))
+                {
+                    case BATTLEGROUND_AB:
+                        // Call to Arms: Arathi Basin
+                        player->UpdateAchievementCriteria(ACHIEVEMENT_CRITERIA_TYPE_COMPLETE_QUEST, 11335);
+                        player->UpdateAchievementCriteria(ACHIEVEMENT_CRITERIA_TYPE_COMPLETE_QUEST, 11339);
+                        break;
+                    case BATTLEGROUND_AV:
+                        // Call to Arms: Alterac Valley
+                        player->UpdateAchievementCriteria(ACHIEVEMENT_CRITERIA_TYPE_COMPLETE_QUEST, 11336);
+                        player->UpdateAchievementCriteria(ACHIEVEMENT_CRITERIA_TYPE_COMPLETE_QUEST, 11340);
+                        break;
+                    case BATTLEGROUND_EY:
+                        // Call to Arms: Eye of the Storm
+                        player->UpdateAchievementCriteria(ACHIEVEMENT_CRITERIA_TYPE_COMPLETE_QUEST, 11337);
+                        player->UpdateAchievementCriteria(ACHIEVEMENT_CRITERIA_TYPE_COMPLETE_QUEST, 11341);
+                        break;
+                    case BATTLEGROUND_WS:
+                        // Call to Arms: Warsong Gulch
+                        player->UpdateAchievementCriteria(ACHIEVEMENT_CRITERIA_TYPE_COMPLETE_QUEST, 11338);
+                        player->UpdateAchievementCriteria(ACHIEVEMENT_CRITERIA_TYPE_COMPLETE_QUEST, 11342);
+                        break;
+                    default:
+                        break;
+                }
             }
 
             player->UpdateAchievementCriteria(ACHIEVEMENT_CRITERIA_TYPE_WIN_BG, player->GetMapId());
@@ -1007,7 +1077,7 @@ void Battleground::EndBattleground(PvPTeamId winnerTeamId)
 
         BlockMovement(player);
 
-        player->GetSession()->SendPacket(&pvpLogData);
+        player->SendDirectMessage(&pvpLogData);
 
         if (isBattleground() && sWorld->getBoolConfig(CONFIG_BATTLEGROUND_STORE_STATISTICS_ENABLE))
         {
@@ -1034,7 +1104,7 @@ void Battleground::EndBattleground(PvPTeamId winnerTeamId)
 
         WorldPacket data;
         sBattlegroundMgr->BuildBattlegroundStatusPacket(&data, this, player->GetCurrentBattlegroundQueueSlot(), STATUS_IN_PROGRESS, TIME_TO_AUTOREMOVE, GetStartTime(), GetArenaType(), player->GetBgTeamId());
-        player->GetSession()->SendPacket(&data);
+        player->SendDirectMessage(&data);
 
         player->UpdateAchievementCriteria(ACHIEVEMENT_CRITERIA_TYPE_COMPLETE_BATTLEGROUND, player->GetMapId());
     }
@@ -1100,6 +1170,11 @@ void Battleground::RemovePlayerAtLeave(Player* player)
     auto const& itr2 = PlayerScores.find(player->GetGUID().GetCounter());
     if (itr2 != PlayerScores.end())
     {
+        // Save stats to ArenaLogEntries before deleting score (for arena logging)
+        auto itr3 = ArenaLogEntries.find(player->GetGUID());
+        if (itr3 != ArenaLogEntries.end())
+            itr3->second.SaveStats(itr2->second->GetDamageDone(), itr2->second->GetHealingDone(), itr2->second->GetKillingBlows());
+
         delete itr2->second;
         PlayerScores.erase(itr2);
     }
@@ -1132,7 +1207,7 @@ void Battleground::RemovePlayerAtLeave(Player* player)
 
         WorldPacket data;
         sBattlegroundMgr->BuildBattlegroundStatusPacket(&data, this, player->GetCurrentBattlegroundQueueSlot(), STATUS_NONE, 0, 0, 0, TEAM_NEUTRAL);
-        player->GetSession()->SendPacket(&data);
+        player->SendDirectMessage(&data);
 
         BattlegroundQueueTypeId bgQueueTypeId = BattlegroundMgr::BGQueueTypeId(GetBgTypeID(), GetArenaType());
 
@@ -1150,7 +1225,7 @@ void Battleground::RemovePlayerAtLeave(Player* player)
         SendPacketToTeam(teamId, &data, player, false);
 
         // cast deserter
-        if (isBattleground() && !player->IsGameMaster() && sWorld->getBoolConfig(CONFIG_BATTLEGROUND_CAST_DESERTER))
+        if (isBattleground() && !player->GetSession()->HasPermission(rbac::RBAC_PERM_NO_BATTLEGROUND_DESERTER_DEBUFF) && sWorld->getBoolConfig(CONFIG_BATTLEGROUND_CAST_DESERTER))
             if (status == STATUS_IN_PROGRESS || status == STATUS_WAIT_JOIN)
                 player->ScheduleDelayedOperation(DELAYED_SPELL_CAST_DESERTER);
 
@@ -1291,16 +1366,19 @@ void Battleground::AddPlayer(Player* player)
     sBattlegroundMgr->BuildPlayerJoinedBattlegroundPacket(&data, player);
     SendPacketToTeam(teamId, &data, player, false);
 
-    player->RemoveAurasByType(SPELL_AURA_MOUNTED);
-
     // add arena specific auras
     if (isArena())
     {
         // restore pets health before remove
-        if (Pet* pet = player->GetPet())
+        Pet* pet = player->GetPet();
+        if (pet)
             if (pet->IsAlive())
                 pet->SetHealth(pet->GetMaxHealth());
 
+        player->RemoveArenaAuras();
+        if (pet)
+            pet->RemoveArenaAuras();
+        player->RemoveArenaSpellCooldowns(true);
         player->RemoveArenaEnchantments(TEMP_ENCHANTMENT_SLOT);
         player->DestroyConjuredItems(true);
         player->UnsummonPetTemporaryIfAny();
@@ -1325,6 +1403,9 @@ void Battleground::AddPlayer(Player* player)
     AddOrSetPlayerToCorrectBgGroup(player, teamId);
 
     sScriptMgr->OnBattlegroundAddPlayer(this, player);
+
+    // WSC-CL - Check if this is a lobby player joining
+    OnLobbyPlayerJoined(player);
 
     // Log
     LOG_DEBUG("bg.battleground", "BATTLEGROUND: Player {} joined the battle.", player->GetName());
@@ -1384,6 +1465,15 @@ void Battleground::RemoveFromBGFreeSlotQueue()
         sBattlegroundMgr->RemoveFromBGFreeSlotQueue(m_RealTypeID, m_InstanceID);
         _InBGFreeSlotQueue = false;
     }
+}
+
+// WSC-CL - Add offline player to battleground (for lobby system)
+void Battleground::AddOfflinePlayer(ObjectGuid guid, TeamId teamId, uint32 offlineTime)
+{
+    OfflinePlayerInfo info;
+    info.offlineTime = offlineTime;  // 0 means not offline yet (just created/invited)
+    info.teamId = teamId;
+    m_OfflinePlayers[guid] = info;
 }
 
 uint32 Battleground::GetFreeSlotsForTeam(TeamId teamId) const
@@ -1451,7 +1541,7 @@ bool Battleground::HasFreeSlots() const
 void Battleground::SpectatorsSendPacket(WorldPacket& data)
 {
     for (SpectatorList::const_iterator itr = m_Spectators.begin(); itr != m_Spectators.end(); ++itr)
-        (*itr)->GetSession()->SendPacket(&data);
+        (*itr)->SendDirectMessage(&data);
 }
 
 void Battleground::ReadyMarkerClicked(Player* p)
@@ -1791,7 +1881,6 @@ bool Battleground::AddSpiritGuide(uint32 type, float x, float y, float z, float 
 
     if (Creature* creature = AddCreature(entry, type, x, y, z, o))
     {
-        creature->setDeathState(DeathState::Dead);
         creature->SetGuidValue(UNIT_FIELD_CHANNEL_OBJECT, creature->GetGUID());
         // aura
         /// @todo: Fix display here
@@ -1923,10 +2012,10 @@ void Battleground::PlayerAddedToBGCheckIfBGIsRunning(Player* player)
     BlockMovement(player);
 
     BuildPvPLogDataPacket(data);
-    player->GetSession()->SendPacket(&data);
+    player->SendDirectMessage(&data);
 
     sBattlegroundMgr->BuildBattlegroundStatusPacket(&data, this, player->GetCurrentBattlegroundQueueSlot(), STATUS_IN_PROGRESS, GetEndTime(), GetStartTime(), GetArenaType(), player->GetBgTeamId());
-    player->GetSession()->SendPacket(&data);
+    player->SendDirectMessage(&data);
 }
 
 uint32 Battleground::GetAlivePlayersCountByTeam(TeamId teamId) const
@@ -2028,4 +2117,112 @@ void Battleground::ExecuteBgStart()
     // Force the battleground to start immediately by setting delay to 0
     // This will trigger StartingEventOpenDoors() on the next update cycle
     SetStartDelayTime(0);
+}
+
+// WSC-CL - Lobby management functions
+void Battleground::SetupLobbyBG(const std::string& lobbyId, const std::string& leader, const std::vector<std::pair<std::string, TeamId>>& players)
+{
+    m_LobbyId = lobbyId;
+    m_LobbyLeader = leader;
+    m_IsLobbyBG = true;
+    m_LobbyJoinedCount = 0;
+    
+    // Setup expected lobby player count
+    m_LobbyExpectedPlayers = players.size();
+    
+    LOG_INFO("bg.battleground", "SetupLobbyBG: Lobby {} with leader {} expects {} players", lobbyId, leader, players.size());
+}
+
+void Battleground::OnLobbyPlayerJoined(Player* player)
+{
+    if (!m_IsLobbyBG || !player)
+        return;
+    
+    // For lobby battlegrounds, any player joining is a lobby player since they come from the lobby system
+    m_LobbyJoinedCount++;
+    
+    LOG_INFO("bg.battleground", "OnLobbyPlayerJoined: Player {} joined lobby BG {} ({}/{})", 
+             player->GetName(), m_LobbyId, m_LobbyJoinedCount, m_LobbyExpectedPlayers);
+    
+    // Check if all lobby players have joined
+    if (m_LobbyJoinedCount >= m_LobbyExpectedPlayers)
+    {
+        LOG_INFO("bg.battleground", "OnLobbyPlayerJoined: All lobby players joined, starting timer for lobby {}", m_LobbyId);
+        StartLobbyTimer();
+    }
+}
+
+void Battleground::StartLobbyTimer()
+{
+    if (!m_IsLobbyBG)
+        return;
+    
+    LOG_INFO("bg.battleground", "StartLobbyTimer: All lobby players joined, starting countdown for lobby {}", m_LobbyId);
+    
+    // Get the configured prep time (same logic as normal _ProcessJoin)
+    uint32 configuredPrepTime;
+    
+    if (GetBgTypeID() == BATTLEGROUND_SA)
+        configuredPrepTime = 120 * IN_MILLISECONDS;
+    else
+        configuredPrepTime = isArena() ?
+            sWorld->getIntConfig(CONFIG_ARENA_PREP_TIME) * IN_MILLISECONDS :
+            sWorld->getIntConfig(CONFIG_BATTLEGROUND_PREP_TIME) * IN_MILLISECONDS;
+    
+    // Start the proper countdown timer
+    SetStartDelayTime(configuredPrepTime);
+    
+    // Reset events so announcements work properly
+    m_Events = 0;
+    
+    // Pre-mark events for announcements based on prep time
+    if (configuredPrepTime < StartDelayTimes[BG_STARTING_EVENT_FIRST])
+    {
+        m_Events |= BG_STARTING_EVENT_1;
+        if (configuredPrepTime < StartDelayTimes[BG_STARTING_EVENT_SECOND])
+        {
+            m_Events |= BG_STARTING_EVENT_2;
+            if (configuredPrepTime < StartDelayTimes[BG_STARTING_EVENT_THIRD])
+            {
+                m_Events |= BG_STARTING_EVENT_3;
+            }
+        }
+    }
+    
+    // Ensure all players have preparation spell when countdown begins
+    for (auto& [guid, player] : m_Players)
+    {
+        if (player && !isArena())
+        {
+            // Check if player already has preparation spell, if not apply it
+            if (!player->HasAura(SPELL_PREPARATION))
+            {
+                player->CastSpell(player, SPELL_PREPARATION, true);
+                LOG_INFO("bg.battleground", "StartLobbyTimer: Applied preparation spell to {}", player->GetName());
+            }
+            else
+            {
+                LOG_INFO("bg.battleground", "StartLobbyTimer: Player {} already has preparation spell", player->GetName());
+            }
+        }
+    }
+    
+    LOG_INFO("bg.battleground", "StartLobbyTimer: Started {}ms countdown for lobby {}", configuredPrepTime, m_LobbyId);
+}
+
+bool Battleground::IsLobbyLeader(Player* player) const
+{
+    if (!m_IsLobbyBG || !player)
+        return false;
+        
+    return player->GetName() == m_LobbyLeader;
+}
+
+void Battleground::ForceStartLobbyBG()
+{
+    if (!m_IsLobbyBG)
+        return;
+        
+    LOG_INFO("bg.battleground", "ForceStartLobbyBG: Lobby leader forcing immediate start for lobby {}", m_LobbyId);
+    ExecuteBgStart();
 }

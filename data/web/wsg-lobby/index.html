@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WSG Lobby System</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="container">
+        <h1>Warsong Gulch Lobby System</h1>
+        
+        <div id="main-menu" class="panel">
+            <h2>Create or Join a Lobby</h2>
+            <button id="create-lobby-btn" class="btn btn-primary">Create New Lobby</button>
+            <div class="separator">OR</div>
+            <input type="text" id="lobby-id-input" placeholder="Enter Lobby ID (e.g., abc-1234)">
+            <button id="join-lobby-btn" class="btn btn-secondary">Join Existing Lobby</button>
+        </div>
+        
+        <div id="create-lobby-form" class="panel hidden">
+            <h2>Create New Lobby</h2>
+            <form id="create-form">
+                <div class="form-group">
+                    <label for="character-import">Character Data:</label>
+                    <textarea id="character-import" placeholder="Paste character export data here (required)" required></textarea>
+                    <small>Character name and faction will be extracted from the data</small>
+                </div>
+                <button type="submit" class="btn btn-primary">Create Lobby</button>
+                <button type="button" id="cancel-create" class="btn btn-secondary">Cancel</button>
+            </form>
+        </div>
+        
+        <div id="join-lobby-form" class="panel hidden">
+            <h2>Join Lobby: <span id="join-lobby-id"></span></h2>
+            <form id="join-form">
+                <div class="form-group">
+                    <label for="participant-import">Character Data:</label>
+                    <textarea id="participant-import" placeholder="Paste character export data here (required)" required></textarea>
+                    <small>Character name and faction will be extracted from the data</small>
+                </div>
+                <button type="submit" class="btn btn-primary">Join Lobby</button>
+                <button type="button" id="cancel-join" class="btn btn-secondary">Cancel</button>
+            </form>
+        </div>
+        
+        <div id="error-message" class="error hidden"></div>
+        <div id="success-message" class="success hidden"></div>
+    </div>
+    
+    <script src="lobby.js"></script>
+</body>
+</html>

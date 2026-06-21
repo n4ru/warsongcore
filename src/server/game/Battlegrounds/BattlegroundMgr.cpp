@@ -1,14 +1,14 @@
 /*
  * This file is part of the AzerothCore Project. See AUTHORS file for Copyright information
  *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU Affero General Public License as published by the
- * Free Software Foundation; either version 3 of the License, or (at your
- * option) any later version.
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
  *
  * This program is distributed in the hope that it will be useful, but WITHOUT
  * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for
+ * FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for
  * more details.
  *
  * You should have received a copy of the GNU General Public License along
@@ -38,6 +38,7 @@
 #include "GameGraveyard.h"
 #include "GameTime.h"
 #include "Map.h"
+#include "MapInstanced.h"
 #include "MapMgr.h"
 #include "MiscPackets.h"
 #include "ObjectMgr.h"
@@ -670,7 +671,7 @@ void BattlegroundMgr::SendAreaSpiritHealerQueryOpcode(Player* player, Battlegrou
     if (time_ == uint32(-1))
         time_ = 0;
     data << guid << time_;
-    player->GetSession()->SendPacket(&data);
+    player->SendDirectMessage(&data);
 }
 
 bool BattlegroundMgr::IsArenaType(BattlegroundTypeId bgTypeId)
@@ -1079,3 +1080,14 @@ std::unordered_map<uint32, ArenaType> BattlegroundMgr::QueueToArenaType =
     { BATTLEGROUND_QUEUE_3v3, ARENA_TYPE_3v3 },
     { BATTLEGROUND_QUEUE_5v5, ARENA_TYPE_5v5 }
 };
+
+// WSC-CL - Helper function to create battleground maps for lobbies
+BattlegroundMap* BattlegroundMgr::CreateBattlegroundMap(uint32 instanceId, Battleground* bg, MapInstanced* mapInstanced)
+{
+    if (!bg || !mapInstanced)
+        return nullptr;
+        
+    // Use the private CreateBattleground function via the MapInstanced class
+    // This is a friend function so we can call it through the manager
+    return mapInstanced->CreateBattleground(instanceId, bg);
+}

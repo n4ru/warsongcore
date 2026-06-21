@@ -1,14 +1,14 @@
 /*
  * This file is part of the AzerothCore Project. See AUTHORS file for Copyright information
  *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU Affero General Public License as published by the
- * Free Software Foundation; either version 3 of the License, or (at your
- * option) any later version.
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
  *
  * This program is distributed in the hope that it will be useful, but WITHOUT
  * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for
+ * FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for
  * more details.
  *
  * You should have received a copy of the GNU General Public License along
@@ -258,11 +258,21 @@ public:
         IP = ip;
     }
 
+    void SaveStats(uint32 damageDone, uint32 healingDone, uint32 killingBlows)
+    {
+        DamageDone = damageDone;
+        HealingDone = healingDone;
+        KillingBlows = killingBlows;
+    }
+
     std::string Name{};
     ObjectGuid::LowType Guid{0};
     uint32 Acc{0};
     uint32 ArenaTeamId{0};
     std::string IP{};
+    uint32 DamageDone{0};
+    uint32 HealingDone{0};
+    uint32 KillingBlows{0};
 };
 
 enum BGHonorMode
@@ -383,6 +393,17 @@ public:
 
     void AddToBGFreeSlotQueue();        // this queue will be useful when more battlegrounds instances will be available
     void RemoveFromBGFreeSlotQueue();   // this method could delete whole BG instance, if another free is available
+    
+    // WSC-CL - Add offline player to battleground (for lobby system)
+    void AddOfflinePlayer(ObjectGuid guid, TeamId teamId, uint32 offlineTime = 0);  // Implementation in cpp file
+    
+    // WSC-CL - Lobby management functions
+    void SetupLobbyBG(const std::string& lobbyId, const std::string& leaderName, const std::vector<std::pair<std::string, TeamId>>& players);
+    void OnLobbyPlayerJoined(Player* player);  // Called when a lobby player actually joins
+    void StartLobbyTimer();  // Start the BG timer when all lobby players have joined
+    void ForceStartLobbyBG();  // Force start the BG for lobby leader
+    bool IsLobbyBG() const { return m_IsLobbyBG; }
+    bool IsLobbyLeader(Player* player) const;
 
     void DecreaseInvitedCount(TeamId teamId)    { if (m_BgInvitedPlayers[teamId]) --m_BgInvitedPlayers[teamId]; }
     void IncreaseInvitedCount(TeamId teamId)    { ++m_BgInvitedPlayers[teamId]; }
@@ -606,6 +627,14 @@ public:
     BattlegroundIC* ToBattlegroundIC() { if (GetBgTypeID(true) == BATTLEGROUND_IC) return reinterpret_cast<BattlegroundIC*>(this); else return nullptr; }
     [[nodiscard]] BattlegroundIC const* ToBattlegroundIC() const { if (GetBgTypeID(true) == BATTLEGROUND_IC) return reinterpret_cast<const BattlegroundIC*>(this); else return nullptr; }
 
+    // WSG Lobby System
+    void SetLobbyCreated(bool created) { m_LobbyCreated = created; }
+    bool IsLobbyCreated() const { return m_LobbyCreated; }
+    void SetDelayedStart(bool delayed) { m_DelayedStart = delayed; }
+    bool IsDelayedStart() const { return m_DelayedStart; }
+    void SetLobbyLeaderName(const std::string& name) { m_LobbyLeaderName = name; }
+    const std::string& GetLobbyLeaderName() const { return m_LobbyLeaderName; }
+
 protected:
     // this method is called, when BG cannot spawn its own spirit guide, or something is wrong, It correctly ends Battleground
     void EndNow();
@@ -673,6 +702,11 @@ private:
     bool   m_PrematureCountDown;
     uint32 m_PrematureCountDownTimer;
     std::string m_Name{};
+    
+    // WSG Lobby System
+    bool   m_LobbyCreated;
+    bool   m_DelayedStart;
+    std::string m_LobbyLeaderName;
 
     /* Pre- and post-update hooks */
 
@@ -715,6 +749,19 @@ private:
         TeamId teamId;       // Player's team
     };
     std::map<ObjectGuid, OfflinePlayerInfo> m_OfflinePlayers;  // Map of offline players with their info
+
+    // WSC-CL - Lobby tracking
+    struct LobbyPlayerInfo
+    {
+        std::string characterName;
+        TeamId teamId;
+        bool hasJoined;  // Whether the player has actually joined the BG
+    };
+    std::string m_LobbyId;  // ID of the lobby that created this battleground
+    std::string m_LobbyLeader;  // Name of the lobby leader (can use .bgstart)
+    uint32 m_LobbyExpectedPlayers;  // Total number of players expected from lobby
+    bool m_IsLobbyBG;  // Whether this BG was created by the lobby system
+    uint32 m_LobbyJoinedCount;  // How many lobby players have actually joined
 
     // Invited counters are useful for player invitation to BG - do not allow, if BG is started to one faction to have 2 more players than another faction
     // Invited counters will be changed only when removing already invited player from queue, removing player from battleground and inviting player to BG

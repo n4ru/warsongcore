@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WSG Lobby - Waiting Room</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="container">
+        <h1>Warsong Gulch Lobby</h1>
+        
+        <div class="lobby-info">
+            <h2>Lobby ID: <span id="lobby-id"></span></h2>
+            <div class="share-link">
+                <label>Share this link:</label>
+                <div class="share-url-container">
+                    <input type="text" id="share-url" readonly>
+                    <button id="copy-link" class="btn btn-small">Copy</button>
+                </div>
+            </div>
+        </div>
+        
+        <div class="teams-container">
+            <div class="team alliance">
+                <h3>Alliance (<span id="alliance-count">0</span>)</h3>
+                <ul id="alliance-players" class="player-list"></ul>
+            </div>
+            
+            <div class="team horde">
+                <h3>Horde (<span id="horde-count">0</span>)</h3>
+                <ul id="horde-players" class="player-list"></ul>
+            </div>
+        </div>
+        
+        <div class="lobby-controls">
+            <div id="leader-controls" class="hidden">
+                <button id="start-game" class="btn btn-primary btn-large" disabled>Start Game</button>
+                <p class="hint">Minimum 2 players required (at least 1 per faction)</p>
+            </div>
+            
+            <div id="waiting-message" class="hidden">
+                <p>Waiting for lobby leader to start the game...</p>
+            </div>
+        </div>
+        
+        <div id="game-started" class="panel hidden">
+            <h2>Game Started!</h2>
+            <p>WSG Instance ID: <span id="wsg-instance"></span></p>
+            <div id="credentials-container">
+                <h3>Account Credentials</h3>
+                <table id="credentials-table">
+                    <thead>
+                        <tr>
+                            <th>Username</th>
+                            <th>Password</th>
+                            <th>Character</th>
+                        </tr>
+                    </thead>
+                    <tbody id="credentials-body"></tbody>
+                </table>
+                <button id="copy-all-credentials" class="btn btn-primary">Copy All Credentials</button>
+            </div>
+            <div class="instructions">
+                <h3>How to Join:</h3>
+                <ol>
+                    <li>Launch World of Warcraft</li>
+                    <li>Use your assigned username and password to login</li>
+                    <li>Your character will automatically be in the Warsong Gulch battleground</li>
+                    <li>The match timer will start when the lobby leader enters</li>
+                </ol>
+            </div>
+        </div>
+        
+        <div id="error-message" class="error hidden"></div>
+        <div id="success-message" class="success hidden"></div>
+    </div>
+    
+    <script>
+        // Get lobby ID from URL
+        const urlParams = new URLSearchParams(window.location.search);
+        const lobbyId = urlParams.get('id');
+        if (!lobbyId) {
+            window.location.href = 'index.html';
+        }
+        document.getElementById('lobby-id').textContent = lobbyId;
+    </script>
+    <script src="lobby.js"></script>
+</body>
+</html>

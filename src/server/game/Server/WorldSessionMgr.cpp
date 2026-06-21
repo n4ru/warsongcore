@@ -1,14 +1,14 @@
 /*
  * This file is part of the AzerothCore Project. See AUTHORS file for Copyright information
  *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU Affero General Public License as published by the
- * Free Software Foundation; either version 3 of the License, or (at your
- * option) any later version.
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
  *
  * This program is distributed in the hope that it will be useful, but WITHOUT
  * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License for
+ * FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for
  * more details.
  *
  * You should have received a copy of the GNU General Public License along
@@ -17,6 +17,7 @@
 
 #include "Chat.h"
 #include "ChatPackets.h"
+#include "RBAC.h"
 #include "GameTime.h"
 #include "Metric.h"
 #include "Player.h"
@@ -323,7 +324,12 @@ void WorldSessionMgr::AddSession_(WorldSession* session)
     // don't count this session when checking player limit
     --Sessions;
 
-    if (pLimit > 0 && Sessions >= pLimit && AccountMgr::IsPlayerAccount(session->GetSecurity()) && !session->CanSkipQueue() && !HasRecentlyDisconnected(session))
+    // Trial accounts do not get account-flag queue priority. RBAC_PERM_SKIP_QUEUE is still honored
+    // since it can be granted intentionally to specific accounts.
+    bool trialQueueRestricted = sWorld->getBoolConfig(CONFIG_TRIAL_RESTRICTION_QUEUE) && session->IsTrialAccount();
+    bool canSkipQueue = session->HasPermission(rbac::RBAC_PERM_SKIP_QUEUE) || (!trialQueueRestricted && session->CanSkipQueue());
+
+    if (pLimit > 0 && Sessions >= pLimit && !canSkipQueue && !HasRecentlyDisconnected(session))
     {
         AddQueuedPlayer(session);
         UpdateMaxSessionCounters();
@@ -390,35 +396,12 @@ void WorldSessionMgr::SendGlobalGMMessage(WorldPacket const* packet, WorldSessio
             itr->second->GetPlayer() &&
             itr->second->GetPlayer()->IsInWorld() &&
             itr->second != self &&
-            !AccountMgr::IsPlayerAccount(itr->second->GetSecurity()) &&
+            itr->second->HasPermission(rbac::RBAC_PERM_RECEIVE_GLOBAL_GM_TEXTMESSAGE) &&
             (teamId == TEAM_NEUTRAL || itr->second->GetPlayer()->GetTeamId() == teamId))
         {
             itr->second->SendPacket(packet);
         }
     }
-}
-
-/// Send a packet to all players (or players selected team) in the zone (except self if mentioned)
-bool WorldSessionMgr::SendZoneMessage(uint32 zone, WorldPacket const* packet, WorldSession* self, TeamId teamId)
-{
-    bool foundPlayerToSend = false;
-    SessionMap::const_iterator itr;
-
-    for (itr = _sessions.begin(); itr != _sessions.end(); ++itr)
-    {
-        if (itr->second &&
-            itr->second->GetPlayer() &&
-            itr->second->GetPlayer()->IsInWorld() &&
-            itr->second->GetPlayer()->GetZoneId() == zone &&
-            itr->second != self &&
-            (teamId == TEAM_NEUTRAL || itr->second->GetPlayer()->GetTeamId() == teamId))
-        {
-            itr->second->SendPacket(packet);
-            foundPlayerToSend = true;
-        }
-    }
-
-    return foundPlayerToSend;
 }
 
 /// Send a server message to the user(s)
@@ -433,14 +416,6 @@ void WorldSessionMgr::SendServerMessage(ServerMessageType messageID, std::string
         player->SendDirectMessage(chatServerMessage.Write());
     else
         SendGlobalMessage(chatServerMessage.Write());
-}
-
-/// Send a System Message to all players in the zone (except self if mentioned)
-void WorldSessionMgr::SendZoneText(uint32 zone, std::string text, WorldSession* self, TeamId teamId)
-{
-    WorldPacket data;
-    ChatHandler::BuildChatPacket(data, CHAT_MSG_SYSTEM, LANG_UNIVERSAL, nullptr, nullptr, text.c_str());
-    SendZoneMessage(zone, &data, self, teamId);
 }
 
 void WorldSessionMgr::DoForAllOnlinePlayers(std::function<void(Player*)> exec)

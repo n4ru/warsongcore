@@ -2,6 +2,7 @@
 # AzerothCore
 #
 
+.cache
 /conf/*
 !/conf/dist
 /modules/*
@@ -54,6 +55,13 @@ CMakeLists.txt.user
 *.LOCAL.*
 
 #
+# Claude
+#
+.claude/worktrees
+.claude/settings.local.json
+.claude/plans/**
+
+#
 # IDE & other software
 #
 /.settings/
@@ -90,6 +98,10 @@ local.properties
 .project
 .cproject
 
+# vcpkg integration
+/vcpkg/
+/vcpkg-ports/
+
 
 # ==================
 #
@@ -108,3 +120,6 @@ local.properties
 /bin/*
 
 wsc.png
+
+# Node.js dependencies
+node_modules/

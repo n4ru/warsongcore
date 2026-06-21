@@ -29,12 +29,17 @@
 #include "DatabaseEnv.h"
 #include "ObjectGuid.h"
 #include "CharacterCache.h"
+#include "WSGLobbyService.h"
+#include "BattlegroundMgr.h"
+#include "Battleground.h"
 #include <boost/beast/version.hpp>
 #include <sstream>
 #include <thread>
 #include <regex>
 #include <unordered_map>
 #include <random>
+#include <algorithm>
+#include <cctype>
 
 CharacterWebService::CharacterWebService(Acore::Asio::IoContext& ioContext, uint16 port)
     : _ioContext(ioContext), _acceptor(ioContext, tcp::endpoint(tcp::v4(), port)), _port(port), _running(false)
@@ -90,6 +95,8 @@ void CharacterWebService::DoAccept()
 
 void CharacterWebService::HandleRequest(tcp::socket socket)
 {
+    // WSC-CL - Reduced logging verbosity for status polling
+    
     try
     {
         boost::beast::flat_buffer buffer;
@@ -100,9 +107,36 @@ void CharacterWebService::HandleRequest(tcp::socket socket)
         std::string response_body;
         http::status status = http::status::ok;
 
-        if (request.method() == http::verb::post && request.target() == "/character/gear")
+        std::string target = std::string(request.target());
+        
+        // Only log non-status requests to reduce spam
+        if (target.find("/status") == std::string::npos)
         {
+            LOG_INFO("server.worldserver", "CharacterWebService: {} {}", 
+                     std::string(request.method_string()), target);
+        }
+        
+        // WSC-CL
+        // Handle CORS preflight requests
+        if (request.method() == http::verb::options)
+        {
+            status = http::status::ok;
+            response_body = "";
+        }
+        // API endpoints only - no static file serving
+        else if (request.method() == http::verb::post && target == "/character/gear")
+        {
+            LOG_ERROR("server.worldserver", "CLAUDE DEBUG: /character/gear endpoint called");
             ProcessCharacterRequest(request.body(), response_body);
+        }
+        else if (target.find("/lobby") == 0)
+        {
+            // Skip processing for OPTIONS requests (already handled above)
+            if (request.method() != http::verb::options)
+            {
+                std::string method = std::string(request.method_string());
+                ProcessLobbyRequest(method, target, request.body(), response_body);
+            }
         }
         else
         {
@@ -114,6 +148,8 @@ void CharacterWebService::HandleRequest(tcp::socket socket)
         response.set(http::field::server, BOOST_BEAST_VERSION_STRING);
         response.set(http::field::content_type, "application/json");
         response.set(http::field::access_control_allow_origin, "*");
+        response.set(http::field::access_control_allow_methods, "GET, POST, OPTIONS");
+        response.set(http::field::access_control_allow_headers, "Content-Type");
         response.body() = response_body;
         response.prepare_payload();
 
@@ -189,6 +225,8 @@ std::vector<std::string> CharacterWebService::ExtractJsonArray(const std::string
 
 void CharacterWebService::ProcessCharacterRequest(const std::string& body, std::string& response)
 {
+    LOG_ERROR("server.worldserver", "CLAUDE DEBUG: ProcessCharacterRequest called with body: [{}]", body);
+    LOG_ERROR("server.worldserver", "CLAUDE DEBUG: Body length: {}", body.length());
     try
     {
         CharacterRequest request;
@@ -203,11 +241,18 @@ void CharacterWebService::ProcessCharacterRequest(const std::string& body, std::
         if (std::regex_search(body, charMatch, charPattern))
         {
             std::string charData = charMatch[1].str();
+            LOG_ERROR("server.worldserver", "CLAUDE DEBUG: Found character data: [{}]", charData);
             request.character.name = ExtractJsonString(charData, "name");
             request.character.level = ExtractJsonNumber(charData, "level");
             request.character.gameClass = ExtractJsonString(charData, "gameClass");
             request.character.race = ExtractJsonString(charData, "race");
             request.character.faction = ExtractJsonString(charData, "faction");
+            LOG_ERROR("server.worldserver", "CLAUDE DEBUG: Extracted - Class: [{}], Race: [{}], Level: {}", 
+                     request.character.gameClass, request.character.race, request.character.level);
+        }
+        else
+        {
+            LOG_ERROR("server.worldserver", "CLAUDE DEBUG: No character object found in JSON");
         }
 
         // Extract items array
@@ -302,17 +347,36 @@ bool CharacterWebService::ApplyCharacterGear(const CharacterRequest& request)
     {
         Field* fields = result->Fetch();
         characterGuid = fields[0].Get<uint32>();
-        accountId = fields[1].Get<uint32>();
+        // Don't use the old account ID - we'll create a new one
         characterExists = true;
         
         LOG_INFO("server.worldserver", "Found existing character '{}' with GUID {}, will delete and recreate", request.character.name, characterGuid);
     }
+    
+    // Always create a new account for this character (whether it exists or not)
+    std::string username = request.character.name;
+    std::transform(username.begin(), username.end(), username.begin(), ::tolower);
+    std::string password = request.character.name; // Simple password = character name
+    
+    AccountOpResult accountResult = AccountMgr::CreateAccount(username, password);
+    if (accountResult == AOR_OK)
+    {
+        accountId = AccountMgr::GetId(username);
+        LOG_INFO("server.worldserver", "Created new account {} (ID: {}) for character '{}'", 
+                 username, accountId, request.character.name);
+    }
+    else if (accountResult == AOR_NAME_ALREADY_EXIST)
+    {
+        // Account already exists, use it
+        accountId = AccountMgr::GetId(username);
+        LOG_INFO("server.worldserver", "Using existing account {} (ID: {}) for character '{}'", 
+                 username, accountId, request.character.name);
+    }
     else
     {
-        // If character doesn't exist, we need an account ID - for now, use account 1
-        // In a real implementation, you'd get this from the request or authentication
-        accountId = 1;
-        LOG_INFO("server.worldserver", "Character '{}' not found, will create new character", request.character.name);
+        LOG_ERROR("server.worldserver", "Failed to create account {} for character '{}': {}", 
+                  username, request.character.name, accountResult);
+        return false;
     }
 
     bool success = true;
@@ -1375,4 +1439,403 @@ bool CharacterWebService::CreateCharacterInDatabase(const CharacterRequest& requ
              request.character.name, newGuid, classId, raceId, request.character.level);
     
     return true;
+}
+
+void CharacterWebService::ProcessLobbyRequest(const std::string& method, const std::string& path, 
+                                              const std::string& body, std::string& response)
+{
+    // Parse the path to determine the action
+    // Format: /lobby/create, /lobby/{id}/join, /lobby/{id}/start, /lobby/{id}/status
+    
+    if (method == "POST" && path == "/lobby/create")
+    {
+        // Extract required fields from JSON body
+        std::string leaderName = ExtractJsonString(body, "leader_name");
+        std::string factionStr = ExtractJsonString(body, "faction");
+        
+        // WSC-CL
+        // Extract character_data as raw JSON (it's not a simple string)
+        std::string characterData;
+        size_t dataStart = body.find("\"character_data\"");
+        if (dataStart != std::string::npos) {
+            dataStart = body.find(":", dataStart);
+            if (dataStart != std::string::npos) {
+                dataStart++; // Skip the colon
+                // Skip whitespace
+                while (dataStart < body.length() && (body[dataStart] == ' ' || body[dataStart] == '\t' || body[dataStart] == '\n' || body[dataStart] == '\r')) {
+                    dataStart++;
+                }
+                
+                // Find the end of the JSON value (could be string, object, or array)
+                if (dataStart < body.length()) {
+                    if (body[dataStart] == '"') {
+                        // It's a JSON string containing escaped JSON
+                        dataStart++; // Skip opening quote
+                        size_t dataEnd = dataStart;
+                        while (dataEnd < body.length()) {
+                            if (body[dataEnd] == '"' && body[dataEnd-1] != '\\') {
+                                break;
+                            }
+                            dataEnd++;
+                        }
+                        characterData = body.substr(dataStart, dataEnd - dataStart);
+                        // Unescape the JSON string
+                        size_t pos = 0;
+                        while ((pos = characterData.find("\\\"", pos)) != std::string::npos) {
+                            characterData.replace(pos, 2, "\"");
+                            pos++;
+                        }
+                        while ((pos = characterData.find("\\\\", pos)) != std::string::npos) {
+                            characterData.replace(pos, 2, "\\");
+                            pos++;
+                        }
+                    } else {
+                        // It's a raw JSON object or array - find matching closing bracket
+                        char openChar = body[dataStart];
+                        char closeChar = (openChar == '{') ? '}' : (openChar == '[' ? ']' : '\0');
+                        if (closeChar != '\0') {
+                            int depth = 1;
+                            size_t dataEnd = dataStart + 1;
+                            while (dataEnd < body.length() && depth > 0) {
+                                if (body[dataEnd] == openChar) depth++;
+                                else if (body[dataEnd] == closeChar) depth--;
+                                dataEnd++;
+                            }
+                            characterData = body.substr(dataStart, dataEnd - dataStart);
+                        }
+                    }
+                }
+            }
+        }
+        
+        LOG_INFO("server.worldserver", "CLAUDE DEBUG: Extracted character_data for leader, length: {}", characterData.length());
+        
+        if (leaderName.empty() || factionStr.empty())
+        {
+            response = "{\"error\":\"Missing required fields\"}";
+            return;
+        }
+        
+        TeamId faction = (factionStr == "Alliance") ? TEAM_ALLIANCE : TEAM_HORDE;
+        
+        // Create the lobby
+        std::string lobbyId = sWSGLobbyService->CreateLobby(leaderName, faction, characterData);
+        
+        if (lobbyId.empty())
+        {
+            response = "{\"error\":\"Failed to create lobby\"}";
+            return;
+        }
+        
+        // Return lobby ID and share URL
+        std::stringstream json;
+        json << "{";
+        json << "\"lobby_id\":\"" << lobbyId << "\",";
+        json << "\"share_url\":\"http://server/lobby/" << lobbyId << "\"";
+        json << "}";
+        response = json.str();
+    }
+    else if (method == "POST" && path.find("/lobby/") == 0 && path.find("/join") != std::string::npos)
+    {
+        // Extract lobby ID from path
+        size_t startPos = path.find("/lobby/") + 7;
+        size_t endPos = path.find("/join");
+        std::string lobbyId = path.substr(startPos, endPos - startPos);
+        
+        // Extract participant data
+        std::string characterName = ExtractJsonString(body, "character_name");
+        std::string factionStr = ExtractJsonString(body, "faction");
+        
+        // WSC-CL
+        // Extract character_data as raw JSON (it's not a simple string)
+        std::string characterData;
+        size_t dataStart = body.find("\"character_data\"");
+        if (dataStart != std::string::npos) {
+            dataStart = body.find(":", dataStart);
+            if (dataStart != std::string::npos) {
+                dataStart++; // Skip the colon
+                // Skip whitespace
+                while (dataStart < body.length() && (body[dataStart] == ' ' || body[dataStart] == '\t' || body[dataStart] == '\n' || body[dataStart] == '\r')) {
+                    dataStart++;
+                }
+                
+                // Find the end of the JSON value (could be string, object, or array)
+                if (dataStart < body.length()) {
+                    if (body[dataStart] == '"') {
+                        // It's a JSON string containing escaped JSON
+                        dataStart++; // Skip opening quote
+                        size_t dataEnd = dataStart;
+                        while (dataEnd < body.length()) {
+                            if (body[dataEnd] == '"' && body[dataEnd-1] != '\\') {
+                                break;
+                            }
+                            dataEnd++;
+                        }
+                        characterData = body.substr(dataStart, dataEnd - dataStart);
+                        // Unescape the JSON string
+                        size_t pos = 0;
+                        while ((pos = characterData.find("\\\"", pos)) != std::string::npos) {
+                            characterData.replace(pos, 2, "\"");
+                            pos++;
+                        }
+                        while ((pos = characterData.find("\\\\", pos)) != std::string::npos) {
+                            characterData.replace(pos, 2, "\\");
+                            pos++;
+                        }
+                    } else {
+                        // It's a raw JSON object or array - find matching closing bracket
+                        char openChar = body[dataStart];
+                        char closeChar = (openChar == '{') ? '}' : (openChar == '[' ? ']' : '\0');
+                        if (closeChar != '\0') {
+                            int depth = 1;
+                            size_t dataEnd = dataStart + 1;
+                            while (dataEnd < body.length() && depth > 0) {
+                                if (body[dataEnd] == openChar) depth++;
+                                else if (body[dataEnd] == closeChar) depth--;
+                                dataEnd++;
+                            }
+                            characterData = body.substr(dataStart, dataEnd - dataStart);
+                        }
+                    }
+                }
+            }
+        }
+        
+        LOG_INFO("server.worldserver", "CLAUDE DEBUG: Extracted character_data for participant, length: {}", characterData.length());
+        
+        if (characterName.empty() || factionStr.empty())
+        {
+            response = "{\"error\":\"Missing required fields\"}";
+            return;
+        }
+        
+        TeamId faction = (factionStr == "Alliance") ? TEAM_ALLIANCE : TEAM_HORDE;
+        
+        // Join the lobby
+        if (!sWSGLobbyService->JoinLobby(lobbyId, characterName, faction, characterData))
+        {
+            response = "{\"error\":\"Failed to join lobby\"}";
+            return;
+        }
+        
+        response = "{\"success\":true}";
+    }
+    else if (method == "POST" && path.find("/lobby/") == 0 && path.find("/start") != std::string::npos)
+    {
+        LOG_ERROR("server.worldserver", "CLAUDE DEBUG: LOBBY START HANDLER CALLED - method: {}, path: {}", method, path);
+        // WSC-CL
+        // Extract lobby ID from path
+        size_t startPos = path.find("/lobby/") + 7;
+        size_t endPos = path.find("/start");
+        std::string lobbyId = path.substr(startPos, endPos - startPos);
+        
+        // Extract requester name
+        std::string requesterName = ExtractJsonString(body, "requester");
+        
+        if (requesterName.empty())
+        {
+            response = "{\"error\":\"Missing requester name\"}";
+            return;
+        }
+        
+        // WSC-CL - Get participant data BEFORE starting lobby to avoid deadlock
+        std::vector<LobbyParticipant> participantsCopy;
+        uint32 wsgInstanceId = 0;
+        {
+            auto lobby = sWSGLobbyService->GetLobby(lobbyId);
+            if (lobby)
+            {
+                std::lock_guard<std::mutex> participantsLock(lobby->participantsMutex);
+                participantsCopy = lobby->participants;
+                LOG_ERROR("server.worldserver", "CLAUDE DEBUG: Copied {} participants from lobby {}", 
+                         participantsCopy.size(), lobbyId);
+                for (const auto& p : participantsCopy)
+                {
+                    LOG_ERROR("server.worldserver", "CLAUDE DEBUG: Participant: {} ({})", 
+                             p.characterName, p.faction == TEAM_ALLIANCE ? "Alliance" : "Horde");
+                }
+            }
+            else
+            {
+                LOG_ERROR("server.worldserver", "CLAUDE DEBUG: Failed to get lobby {}", lobbyId);
+            }
+        }
+        
+        // Start the lobby - this now handles account creation internally
+        LOG_ERROR("server.worldserver", "CLAUDE DEBUG: About to start lobby {}", lobbyId);
+        if (!sWSGLobbyService->StartLobby(lobbyId, requesterName))
+        {
+            response = "{\"error\":\"Failed to start lobby\"}";
+            return;
+        }
+        LOG_ERROR("server.worldserver", "CLAUDE DEBUG: Lobby {} started successfully", lobbyId);
+        
+        // Get the WSG instance ID after starting
+        {
+            auto lobby = sWSGLobbyService->GetLobby(lobbyId);
+            if (lobby)
+            {
+                wsgInstanceId = lobby->wsgInstanceId;
+            }
+        }
+        
+        // Create all characters from lobby data (refactored approach)
+        LOG_ERROR("server.worldserver", "CLAUDE DEBUG: participantsCopy.size() = {}", participantsCopy.size());
+        if (!participantsCopy.empty())
+        {
+            LOG_ERROR("server.worldserver", "CLAUDE DEBUG: Creating {} characters from lobby participant data", participantsCopy.size());
+            for (const auto& participant : participantsCopy)
+            {
+                LOG_INFO("server.worldserver", "DEBUG: Creating character {} using ProcessCharacterRequest", participant.characterName);
+                
+                // WSC-CL
+                // Use the existing ProcessCharacterRequest function which works perfectly
+                std::string characterData = participant.characterData;
+                LOG_INFO("server.worldserver", "CLAUDE DEBUG: Character data length for {}: {}", 
+                         participant.characterName, characterData.length());
+                
+                // If character data is too short or missing, create a default character JSON
+                if (characterData.length() < 50) {
+                    LOG_INFO("server.worldserver", "CLAUDE DEBUG: Character data too short, creating default data");
+                    
+                    // Create default character data based on faction
+                    std::stringstream defaultData;
+                    defaultData << "{";
+                    defaultData << "\"phase\": 2,";
+                    defaultData << "\"character\": {";
+                    defaultData << "\"name\": \"" << participant.characterName << "\",";
+                    defaultData << "\"level\": 19,";
+                    
+                    if (participant.faction == TEAM_ALLIANCE) {
+                        defaultData << "\"race\": \"HUMAN\",";
+                        defaultData << "\"gameClass\": \"WARRIOR\",";
+                        defaultData << "\"faction\": \"Alliance\"";
+                    } else {
+                        defaultData << "\"race\": \"ORC\",";
+                        defaultData << "\"gameClass\": \"WARRIOR\",";
+                        defaultData << "\"faction\": \"Horde\"";
+                    }
+                    
+                    defaultData << "},";
+                    defaultData << "\"items\": [],";
+                    defaultData << "\"talents\": [],";
+                    defaultData << "\"glyphs\": []";
+                    defaultData << "}";
+                    
+                    characterData = defaultData.str();
+                    LOG_INFO("server.worldserver", "CLAUDE DEBUG: Created default character data: {}", characterData);
+                }
+                
+                // WSC-CL
+                // Remove array brackets if present (character data should be an object, not an array)
+                if (characterData.length() > 2 && characterData[0] == '[' && characterData[characterData.length()-1] == ']') {
+                    characterData = characterData.substr(1, characterData.length() - 2);
+                    LOG_INFO("server.worldserver", "CLAUDE DEBUG: Removed array brackets from character data");
+                }
+                
+                // Call ProcessCharacterRequest directly with the character data
+                std::string response;
+                LOG_INFO("server.worldserver", "CLAUDE DEBUG: Calling ProcessCharacterRequest with data length: {}", characterData.length());
+                ProcessCharacterRequest(characterData, response);
+                
+                // Check if character was created successfully
+                if (response.find("\"success\":true") != std::string::npos) {
+                    LOG_INFO("server.worldserver", "Successfully created character {} for lobby {} using ProcessCharacterRequest",
+                             participant.characterName, lobbyId);
+                } else {
+                    LOG_ERROR("server.worldserver", "Failed to create character {} for lobby {}: {}",
+                              participant.characterName, lobbyId, response);
+                    continue; // Skip to next participant
+                }
+                
+                
+                // WSC-CL
+                // Register the character for WSG lobby battleground
+                uint32 charGuid = sCharacterCache->GetCharacterGuidByName(participant.characterName).GetCounter();
+                if (charGuid > 0 && wsgInstanceId > 0)
+                {
+                    // Get the battleground instance
+                    Battleground* bg = sBattlegroundMgr->GetBattleground(wsgInstanceId, BATTLEGROUND_WS);
+                    if (bg)
+                    {
+                        CharacterDatabaseTransaction trans = CharacterDatabase.BeginTransaction();
+                        
+                        // Add entry to wsg_lobby_players table
+                        trans->Append("INSERT INTO wsg_lobby_players (guid, battleground_instance_id, team_id) VALUES ({}, {}, {}) "
+                                     "ON DUPLICATE KEY UPDATE battleground_instance_id = {}, team_id = {}",
+                                     charGuid, wsgInstanceId, participant.faction, wsgInstanceId, participant.faction);
+                        
+                        CharacterDatabase.CommitTransaction(trans);
+                        
+                        // WSC-CL - Add player to battleground as offline player
+                        // This ensures they're tracked by the BG system
+                        ObjectGuid playerGuid = ObjectGuid(HighGuid::Player, charGuid);
+                        bg->AddOfflinePlayer(playerGuid, participant.faction, 0);  // 0 = not offline yet, just created
+                        
+                        // Increase invited count for the team
+                        bg->IncreaseInvitedCount(participant.faction);
+                        
+                        LOG_INFO("server.worldserver", "Registered character {} (GUID: {}) for WSG lobby instance {} on team {}",
+                                 participant.characterName, charGuid, wsgInstanceId, 
+                                 participant.faction == TEAM_ALLIANCE ? "Alliance" : "Horde");
+                    }
+                    else
+                    {
+                        LOG_ERROR("server.worldserver", "Failed to get battleground instance {} for character registration", wsgInstanceId);
+                    }
+                }
+                else
+                {
+                    if (charGuid == 0)
+                        LOG_ERROR("server.worldserver", "Failed to get character GUID for {}", participant.characterName);
+                    if (wsgInstanceId == 0)
+                        LOG_ERROR("server.worldserver", "No WSG instance ID available for lobby {}", lobbyId);
+                }
+            }
+        }
+        
+        // Build response with account credentials and WSG instance ID (as expected by frontend)
+        std::ostringstream responseBuilder;
+        responseBuilder << "{\"success\":true,\"wsg_instance_id\":" << wsgInstanceId << ",\"accounts\":[";
+        
+        bool first = true;
+        for (const auto& participant : participantsCopy)
+        {
+            if (!first) responseBuilder << ",";
+            responseBuilder << "{";
+            responseBuilder << "\"username\":\"" << participant.characterName << "\",";
+            responseBuilder << "\"password\":\"" << participant.characterName << "\"";  // Password = character name
+            responseBuilder << "}";
+            first = false;
+        }
+        
+        responseBuilder << "],\"message\":\"Lobby started and characters created successfully\"}";
+        response = responseBuilder.str();
+        
+        LOG_ERROR("server.worldserver", "CLAUDE DEBUG: Lobby start response: {}", response);
+    }
+    else if (method == "GET" && path.find("/lobby/") == 0 && path.find("/status") != std::string::npos)
+    {
+        // Extract lobby ID from path
+        size_t startPos = path.find("/lobby/") + 7;
+        size_t endPos = path.find("/status");
+        std::string lobbyId = path.substr(startPos, endPos - startPos);
+        
+        response = sWSGLobbyService->GetLobbyStatusJson(lobbyId);
+    }
+    else if (method == "GET" && path.find("/lobby/") == 0 && path.find("/stream") != std::string::npos)
+    {
+        // Server-Sent Events for real-time updates
+        // This would require a different response format and persistent connection
+        // For now, return current status
+        size_t startPos = path.find("/lobby/") + 7;
+        size_t endPos = path.find("/stream");
+        std::string lobbyId = path.substr(startPos, endPos - startPos);
+        
+        response = sWSGLobbyService->GetLobbyStatusJson(lobbyId);
+    }
+    else
+    {
+        response = "{\"error\":\"Invalid lobby endpoint\"}";
+    }
 }

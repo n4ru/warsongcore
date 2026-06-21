@@ -93,6 +93,7 @@ private:
     void DoAccept();
     void HandleRequest(tcp::socket socket);
     void ProcessCharacterRequest(const std::string& body, std::string& response);
+    void ProcessLobbyRequest(const std::string& method, const std::string& path, const std::string& body, std::string& response);
     
     // JSON parsing helpers
     std::string ExtractJsonString(const std::string& json, const std::string& key);
