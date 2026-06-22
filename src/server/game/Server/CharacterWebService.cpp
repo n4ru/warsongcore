@@ -689,7 +689,7 @@ bool CharacterWebService::ApplyItemToDatabase(uint32 characterGuid, const ItemDa
     return true;
 }
 
-bool CharacterWebService::ApplyEnchantmentToDatabase(uint32 itemGuid, const ItemData::EnchantData& enchantData, CharacterDatabaseTransaction& trans)
+bool CharacterWebService::ApplyEnchantmentToDatabase(uint32 /*itemGuid*/, const ItemData::EnchantData& enchantData, CharacterDatabaseTransaction& trans)
 {
     SpellItemEnchantmentEntry const* enchant = sSpellItemEnchantmentStore.LookupEntry(enchantData.id);
     if (!enchant)
